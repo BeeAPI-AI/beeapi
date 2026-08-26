@@ -1,0 +1,272 @@
+package configurator
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+
+	"github.com/BeeAPI-AI/beeapi/internal/state"
+)
+
+var SupportedAgents = []string{"claude", "codex", "gemini", "opencode", "openclaw"}
+
+type Options struct {
+	Endpoint   string
+	APIKey     string
+	Model      string
+	Models     map[string]string
+	Agents     []string
+	BinaryPath string
+}
+
+type Result struct {
+	BackupID string
+	Files    []string
+	Hints    []string
+}
+
+func Apply(store *state.Store, options Options) (Result, error) {
+	if store == nil {
+		return Result{}, errors.New("缺少本地状态目录")
+	}
+	options.Endpoint = strings.TrimRight(strings.TrimSpace(options.Endpoint), "/")
+	options.APIKey = strings.TrimSpace(options.APIKey)
+	options.Model = strings.TrimSpace(options.Model)
+	if options.Endpoint == "" || options.APIKey == "" {
+		return Result{}, errors.New("入口和 API Key 均不能为空")
+	}
+	agents, err := normalizeAgents(options.Agents)
+	if err != nil {
+		return Result{}, err
+	}
+	home, err := targetHome()
+	if err != nil {
+		return Result{}, err
+	}
+	paths := targetPaths(home, agents)
+	backup, err := store.CreateBackup(paths)
+	if err != nil {
+		return Result{}, fmt.Errorf("创建配置备份: %w", err)
+	}
+	result := Result{BackupID: backup.ID}
+	for _, agent := range agents {
+		if modelForAgent(options, agent) == "" {
+			return Result{}, fmt.Errorf("没有为 %s 选择模型", agent)
+		}
+		path := pathForAgent(home, agent)
+		if err := writeAgent(path, agent, options); err != nil {
+			_, _ = store.Rollback(backup.ID)
+			return Result{}, fmt.Errorf("写入 %s 配置失败（已自动回滚）: %w", agent, err)
+		}
+		result.Files = append(result.Files, path)
+		switch agent {
+		case "codex":
+			result.Hints = append(result.Hints, "Codex: codex --profile beeapi（或 beeapi run codex）")
+		case "gemini":
+			result.Hints = append(result.Hints, "Gemini CLI: beeapi run gemini")
+		}
+	}
+	return result, nil
+}
+
+func normalizeAgents(input []string) ([]string, error) {
+	if len(input) == 0 {
+		input = []string{"claude", "codex", "opencode"}
+	}
+	allowed := map[string]bool{}
+	for _, agent := range SupportedAgents {
+		allowed[agent] = true
+	}
+	seen := map[string]bool{}
+	var result []string
+	for _, raw := range input {
+		for _, part := range strings.Split(raw, ",") {
+			agent := strings.ToLower(strings.TrimSpace(part))
+			if agent == "all" {
+				return append([]string(nil), SupportedAgents...), nil
+			}
+			if agent == "" {
+				continue
+			}
+			if !allowed[agent] {
+				return nil, fmt.Errorf("不支持的智能体 %q，可选: %s", agent, strings.Join(SupportedAgents, ", "))
+			}
+			if !seen[agent] {
+				seen[agent] = true
+				result = append(result, agent)
+			}
+		}
+	}
+	if len(result) == 0 {
+		return nil, errors.New("至少选择一个智能体")
+	}
+	return result, nil
+}
+
+func targetHome() (string, error) {
+	if override := strings.TrimSpace(os.Getenv("GETBEE_TARGET_HOME")); override != "" {
+		return override, nil
+	}
+	return os.UserHomeDir()
+}
+
+func targetPaths(home string, agents []string) []string {
+	paths := make([]string, 0, len(agents))
+	for _, agent := range agents {
+		paths = append(paths, pathForAgent(home, agent))
+	}
+	sort.Strings(paths)
+	return paths
+}
+
+func pathForAgent(home, agent string) string {
+	switch agent {
+	case "claude":
+		return filepath.Join(home, ".claude", "settings.json")
+	case "codex":
+		return filepath.Join(home, ".codex", "beeapi.config.toml")
+	case "gemini":
+		return filepath.Join(home, ".config", "getbeeapi", "gemini.env")
+	case "opencode":
+		return filepath.Join(home, ".config", "opencode", "opencode.json")
+	case "openclaw":
+		return filepath.Join(home, ".openclaw", "openclaw.json")
+	default:
+		return filepath.Join(home, ".config", "getbeeapi", agent+".json")
+	}
+}
+
+func writeAgent(path, agent string, options Options) error {
+	model := modelForAgent(options, agent)
+	switch agent {
+	case "claude":
+		return mergeJSON(path, map[string]any{
+			"env": map[string]any{
+				"ANTHROPIC_AUTH_TOKEN":           options.APIKey,
+				"ANTHROPIC_BASE_URL":             options.Endpoint + "/anthropic",
+				"ANTHROPIC_MODEL":                model,
+				"ANTHROPIC_DEFAULT_HAIKU_MODEL":  model,
+				"ANTHROPIC_DEFAULT_SONNET_MODEL": model,
+				"ANTHROPIC_DEFAULT_OPUS_MODEL":   model,
+			},
+		})
+	case "codex":
+		binary := strings.TrimSpace(options.BinaryPath)
+		if binary == "" {
+			binary = "beeapi"
+		}
+		content := `# Managed by GetBeeAPI. The official ChatGPT login in auth.json is untouched.
+model_provider = "beeapi"
+model = ` + strconv.Quote(model) + `
+model_reasoning_effort = "high"
+disable_response_storage = true
+
+[model_providers.beeapi]
+name = "BeeAPI"
+base_url = ` + strconv.Quote(options.Endpoint+"/v1") + `
+wire_api = "responses"
+
+[model_providers.beeapi.auth]
+command = ` + strconv.Quote(binary) + `
+args = ["token", "print"]
+refresh_interval_ms = 0
+timeout_ms = 5000
+`
+		return secureWrite(path, []byte(content))
+	case "gemini":
+		content := "# Managed by GetBeeAPI; use with: beeapi run gemini\n" +
+			"GOOGLE_GEMINI_BASE_URL=" + shellQuote(options.Endpoint) + "\n" +
+			"GEMINI_API_KEY=" + shellQuote(options.APIKey) + "\n" +
+			"GEMINI_MODEL=" + shellQuote(model) + "\n"
+		return secureWrite(path, []byte(content))
+	case "opencode":
+		return mergeJSON(path, map[string]any{
+			"$schema": "https://opencode.ai/config.json",
+			"model":   "beeapi/" + model,
+			"provider": map[string]any{
+				"beeapi": map[string]any{
+					"npm":  "@ai-sdk/openai-compatible",
+					"name": "BeeAPI",
+					"options": map[string]any{
+						"baseURL": options.Endpoint + "/v1",
+						"apiKey":  options.APIKey,
+					},
+					"models": map[string]any{model: map[string]any{"name": model}},
+				},
+			},
+		})
+	case "openclaw":
+		return mergeJSON(path, map[string]any{
+			"agents": map[string]any{"defaults": map[string]any{"model": map[string]any{"primary": "beeapi/" + model}}},
+			"models": map[string]any{
+				"mode": "merge",
+				"providers": map[string]any{
+					"beeapi": map[string]any{
+						"baseUrl": options.Endpoint + "/v1",
+						"apiKey":  options.APIKey,
+						"api":     "openai-responses",
+						"models":  []any{map[string]any{"id": model, "name": model}},
+					},
+				},
+			},
+		})
+	default:
+		return fmt.Errorf("未知智能体: %s", agent)
+	}
+}
+
+func modelForAgent(options Options, agent string) string {
+	if options.Models != nil {
+		if model := strings.TrimSpace(options.Models[agent]); model != "" {
+			return model
+		}
+	}
+	return strings.TrimSpace(options.Model)
+}
+
+func mergeJSON(path string, patch map[string]any) error {
+	current := map[string]any{}
+	if b, err := os.ReadFile(path); err == nil {
+		if len(strings.TrimSpace(string(b))) > 0 {
+			if err := json.Unmarshal(b, &current); err != nil {
+				return fmt.Errorf("现有 JSON 无法解析: %w", err)
+			}
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	deepMerge(current, patch)
+	b, err := json.MarshalIndent(current, "", "  ")
+	if err != nil {
+		return err
+	}
+	return secureWrite(path, append(b, '\n'))
+}
+
+func secureWrite(path string, data []byte) error {
+	if err := state.AtomicWrite(path, data, 0o600); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o600)
+}
+
+func deepMerge(dst, src map[string]any) {
+	for key, value := range src {
+		srcMap, srcOK := value.(map[string]any)
+		dstMap, dstOK := dst[key].(map[string]any)
+		if srcOK && dstOK {
+			deepMerge(dstMap, srcMap)
+			continue
+		}
+		dst[key] = value
+	}
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
+}
