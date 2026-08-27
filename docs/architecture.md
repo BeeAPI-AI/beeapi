@@ -33,7 +33,7 @@ beeapi
 
 1. 从 XIU2/CloudflareSpeedTest 官方 GitHub Release API 选择当前平台的发行包。
 2. 验证 Release API 提供的 SHA-256 digest，限制下载与解压大小，只释放所需二进制、IP 段和许可证文件。
-3. 使用目标 BeeAPI 域名进行 HTTPS 测速。
+3. 使用目标 BeeAPI 域名的 `/api/v1/public/api-endpoints` 进行 HTTPing；按实际 API 延迟、丢包与稳定性排序，不做与 AI API 场景无关的大文件带宽测速。
 4. 用候选 IP 建立连接，同时保留 BeeAPI 域名作为 URL 与 TLS SNI；只有证书和业务接口都成功才接受。
 5. 备份 Hosts，并只写入带以下标记的受管区块：
 

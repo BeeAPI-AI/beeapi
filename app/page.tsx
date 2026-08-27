@@ -7,7 +7,7 @@ const phases = [
     key: "ROUTE",
     title: "线路优选",
     description: "先检查 beeapi.ai 与 beeapi.dev；需要时从可访问的 Cloudflare IP 中，选择延迟更低、表现更稳定的一条。",
-    note: "可访问性 → 速度排序 → 安全复验",
+    note: "可访问性 → API 延迟排序 → 安全复验",
   },
   {
     number: "02",
@@ -58,7 +58,7 @@ const safeguards = [
 const faqs = [
   {
     question: "线路优选具体在选择什么？",
-    answer: "先筛选能够正常访问 BeeAPI 的 Cloudflare IP，再根据延迟、下载速度与多次探测结果排序。最终候选还要通过 BeeAPI 域名的 TLS 与 API 响应验证。",
+    answer: "先用 BeeAPI 公共接口筛选真正可访问的 Cloudflare IP，再根据 API 延迟、丢包与多次探测结果排序。最终候选还要通过 BeeAPI 域名的 TLS 与 API 响应验证。",
   },
   {
     question: "它会直接覆盖我现有的配置吗？",
@@ -312,7 +312,7 @@ export default function Home() {
             <p>CloudflareSpeedTest 会先排除不可访问的 IP，再根据延迟与稳定性排序。最终候选还要通过 BeeAPI 域名的 TLS 证书与 API 响应验证。</p>
             <div className="fact-row">
               <span><strong>01</strong> 可访问性筛选</span>
-              <span><strong>02</strong> 速度与稳定性排序</span>
+              <span><strong>02</strong> API 延迟与稳定性排序</span>
               <span><strong>03</strong> TLS / API 复验</span>
             </div>
           </div>
@@ -329,7 +329,7 @@ export default function Home() {
             <ol className="network-steps">
               <li><span>01</span><p><strong>检查官方域名可用性</strong><small>先判断是否需要优选，并记录可以直接使用的入口</small></p><b>HTTPS</b></li>
               <li><span>02</span><p><strong>筛选可访问的 Cloudflare IP</strong><small>剔除超时、拒绝连接与响应异常的候选</small></p><b>可访问</b></li>
-              <li><span>03</span><p><strong>按速度与稳定性排序</strong><small>综合延迟、下载速度与多次探测结果</small></p><b>低延迟</b></li>
+              <li><span>03</span><p><strong>按 API 延迟与稳定性排序</strong><small>综合响应延迟、丢包与多次探测结果</small></p><b>低延迟</b></li>
               <li><span>04</span><p><strong>复验并按需写入 Hosts</strong><small>通过 BeeAPI 域名的 TLS 与 API 验证后再应用</small></p><b>可恢复</b></li>
             </ol>
           </div>

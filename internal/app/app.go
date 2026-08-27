@@ -750,7 +750,15 @@ func (r *runner) optimizeAndMaybeApply(host string, forceApply, assumeYes bool) 
 	if err != nil {
 		return result, err
 	}
-	fmt.Fprintf(r.out, "  最优 IP %s，延迟 %s ms，速度 %s MB/s，节点 %s\n", result.IP, result.LatencyMS, result.SpeedMB, result.Colo)
+	fmt.Fprintln(r.out)
+	fmt.Fprintf(r.out, "  最优 IP %s，BeeAPI API 延迟 %s ms", result.IP, result.LatencyMS)
+	if result.SpeedMB != "" {
+		fmt.Fprintf(r.out, "，速度 %s MB/s", result.SpeedMB)
+	}
+	if result.Colo != "" {
+		fmt.Fprintf(r.out, "，节点 %s", result.Colo)
+	}
+	fmt.Fprintln(r.out, "（TLS 与业务接口复验通过）")
 	apply := forceApply
 	if !forceApply && !assumeYes {
 		answer, askErr := r.ask("  写入受管 Hosts 记录？会先备份，可随时恢复 [y/N]: ")

@@ -2,7 +2,7 @@
 
 GetBeeAPI 是把 BeeAPI 快速接入现有 AI 工具的跨平台配置器，不是一个新的智能体。安装后运行 `beeapi`，按下面的顺序工作：
 
-1. 检测 `beeapi.ai` 与 `beeapi.dev`；需要优选时，先筛选可访问的 Cloudflare IP，再按速度与稳定性排序，通过 TLS 与 API 复验后按需写入受管 Hosts。
+1. 检测 `beeapi.ai` 与 `beeapi.dev`；需要优选时，用 BeeAPI 公共接口筛选可访问的 Cloudflare IP，再按 API 延迟、丢包与稳定性排序，通过 TLS 与 API 复验后按需写入受管 Hosts。
 2. 让用户在 BeeAPI 网站授权登录并选择一枚已有 Key，或直接粘贴 API Key 作为兼容回退。
 3. 检测本机 Claude Code、Claude Desktop（Code 模式）、Codex、Gemini CLI、Grok Build、OpenCode、OpenClaw 与 Hermes。
 4. 多选目标工具和模型，备份原配置后写入；失败自动回滚。

@@ -3,9 +3,59 @@ package routeopt
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
+
+func TestCFSTArgsProbeTheBeeAPIBusinessEndpoint(t *testing.T) {
+	args := cfstArgs("/tmp/ip.txt", "/tmp/result.csv", "beeapi.ai")
+	joined := strings.Join(args, " ")
+	wantURL := "https://beeapi.ai/api/v1/public/api-endpoints"
+	if !slices.Contains(args, wantURL) {
+		t.Fatalf("CFST args are missing business probe URL %q: %#v", wantURL, args)
+	}
+	for _, want := range []string{"-httping", "-httping-code", "200", "-dd"} {
+		if !slices.Contains(args, want) {
+			t.Fatalf("CFST args are missing %q: %#v", want, args)
+		}
+	}
+	if slices.Contains(args, "https://beeapi.ai/cdn-cgi/trace") || slices.Contains(args, "-dn") || slices.Contains(args, "-dt") {
+		t.Fatalf("CFST args still depend on the unavailable trace or download probe: %#v", args)
+	}
+	if !strings.Contains(joined, "-p 0") {
+		t.Fatalf("CFST should suppress its misleading download-speed table: %#v", args)
+	}
+}
+
+func TestParseResultExplainsMissingCFSTOutput(t *testing.T) {
+	_, err := parseResult(filepath.Join(t.TempDir(), "missing.csv"))
+	if err == nil || !strings.Contains(err.Error(), "没有生成测速结果") {
+		t.Fatalf("unexpected missing result error: %v", err)
+	}
+}
+
+func TestCFSTPermissionErrorExplainsNoExecCache(t *testing.T) {
+	err := cfstRunError(os.ErrPermission)
+	if !strings.Contains(err.Error(), "noexec") || !strings.Contains(err.Error(), "GETBEE_CACHE") {
+		t.Fatalf("unexpected permission error: %v", err)
+	}
+}
+
+func TestParseLatencyResultOmitsUnmeasuredSpeedAndUnknownColo(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "result.csv")
+	data := "IP,Sent,Received,Loss,Latency,Speed,Colo\n127.0.0.1,4,4,0.00,1.25,0.00,N/A\n"
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := parseResult(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.SpeedMB != "" || result.Colo != "" || result.LatencyMS != "1.25" {
+		t.Fatalf("unexpected latency-only result: %#v", result)
+	}
+}
 
 func TestManagedHostsPreservesUnrelatedEntries(t *testing.T) {
 	original := "127.0.0.1 localhost\n10.0.0.2 internal.example\n"

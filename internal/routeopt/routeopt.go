@@ -321,25 +321,13 @@ func Optimize(ctx context.Context, binaryPath, host string, output io.Writer) (R
 	}
 	defer os.RemoveAll(work)
 	csvPath := filepath.Join(work, "result.csv")
-	args := []string{
-		"-f", ipFile,
-		"-o", csvPath,
-		"-p", "5",
-		"-n", "100",
-		"-t", "4",
-		"-dn", "5",
-		"-dt", "5",
-		"-tp", "443",
-		"-tlr", "0.2",
-		"-url", "https://" + host + "/cdn-cgi/trace",
-		"-httping",
-	}
+	args := cfstArgs(ipFile, csvPath, host)
 	cmd := exec.CommandContext(ctx, binaryPath, args...)
 	cmd.Dir = work
 	cmd.Stdout = output
 	cmd.Stderr = output
 	if err := cmd.Run(); err != nil {
-		return Result{}, fmt.Errorf("CloudflareSpeedTest 执行失败: %w", err)
+		return Result{}, cfstRunError(err)
 	}
 	result, err := parseResult(csvPath)
 	if err != nil {
@@ -351,9 +339,35 @@ func Optimize(ctx context.Context, binaryPath, host string, output io.Writer) (R
 	return result, nil
 }
 
+func cfstRunError(err error) error {
+	if errors.Is(err, os.ErrPermission) {
+		return fmt.Errorf("CloudflareSpeedTest 无法从缓存目录执行；该目录可能以 noexec 挂载，请把 GETBEE_CACHE 指向允许执行的用户目录后重试: %w", err)
+	}
+	return fmt.Errorf("CloudflareSpeedTest 执行失败: %w", err)
+}
+
+func cfstArgs(ipFile, csvPath, host string) []string {
+	return []string{
+		"-f", ipFile,
+		"-o", csvPath,
+		"-p", "0",
+		"-n", "50",
+		"-t", "4",
+		"-tp", "443",
+		"-tlr", "0.2",
+		"-url", "https://" + host + "/api/v1/public/api-endpoints",
+		"-httping",
+		"-httping-code", "200",
+		"-dd",
+	}
+}
+
 func parseResult(path string) (Result, error) {
 	file, err := os.Open(path)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return Result{}, errors.New("CFST 没有生成测速结果；当前网络可能阻止直连 Cloudflare IP，请稍后重试或继续使用可用域名")
+		}
 		return Result{}, err
 	}
 	defer file.Close()
@@ -372,11 +386,11 @@ func parseResult(path string) (Result, error) {
 	if len(row) > 4 {
 		result.LatencyMS = strings.TrimSpace(row[4])
 	}
-	if len(row) > 5 {
-		result.SpeedMB = strings.TrimSpace(row[5])
-	}
 	if len(row) > 6 {
 		result.Colo = strings.TrimSpace(row[6])
+		if strings.EqualFold(result.Colo, "N/A") {
+			result.Colo = ""
+		}
 	}
 	return result, nil
 }

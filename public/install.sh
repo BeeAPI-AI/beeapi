@@ -73,7 +73,12 @@ download() {
   if command -v curl >/dev/null 2>&1; then
     curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 "$url" --output "$destination"
   elif command -v wget >/dev/null 2>&1; then
-    wget --https-only --quiet "$url" --output-document "$destination"
+    if wget --help 2>&1 | grep -q 'https-only'; then
+      wget --https-only --quiet "$url" --output-document "$destination"
+    else
+      printf '%s\n' "This wget cannot enforce HTTPS-only redirects; install curl or GNU Wget" >&2
+      exit 1
+    fi
   else
     printf '%s\n' "curl or wget is required" >&2
     exit 1
@@ -116,7 +121,7 @@ case ":$PATH:" in
 esac
 
 if [ "$run_setup" -eq 1 ]; then
-  if [ -r /dev/tty ]; then
+  if [ -r /dev/tty ] && ( : </dev/tty ) 2>/dev/null; then
     exec "$install_dir/beeapi" </dev/tty
   else
     printf '\nRun %s/beeapi to start the setup guide.\n' "$install_dir"

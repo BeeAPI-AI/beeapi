@@ -51,7 +51,9 @@ test("ships matching verified installers", async () => {
 
   assert.match(shell, /SHA-256 verification failed/);
   assert.match(shell, /github\.com\/BeeAPI-AI\/beeapi\/releases/);
+  assert.match(shell, /\( : <\/dev\/tty \) 2>\/dev\/null/);
   assert.match(shell, /exec "\$install_dir\/beeapi" <\/dev\/tty/);
+  assert.match(shell, /cannot enforce HTTPS-only redirects/);
   assert.match(powerShell, /Get-FileHash -Algorithm SHA256/);
   assert.match(powerShell, /github\.com\/BeeAPI-AI\/beeapi\/releases/);
   assert.match(powerShell, /& \$Target/);
