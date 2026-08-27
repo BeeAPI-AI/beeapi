@@ -72,7 +72,7 @@ func Run(ctx context.Context, args []string, version string, in io.Reader, out, 
 }
 
 func printHelp(out io.Writer) {
-	fmt.Fprintln(out, `beeapi — BeeAPI 网络修复与多智能体配置工具
+	fmt.Fprintln(out, `beeapi — 为现有 AI 工具快速配置 BeeAPI
 
 用法:
   beeapi                         启动完整向导
@@ -83,10 +83,10 @@ func printHelp(out io.Writer) {
   beeapi network optimize        使用 CloudflareSpeedTest 优选 IP
   beeapi network restore         移除 beeapi 管理的 Hosts 记录
   beeapi rollback [latest|编号]  恢复配置备份
-  beeapi run <工具> [参数...]    用 BeeAPI 配置启动目标 CLI
+  beeapi run <工具> [参数...]    用 BeeAPI 配置启动目标工具
   beeapi token print             仅向标准输出打印已保存的 API Key
 
-支持: Claude Code、Codex、Gemini CLI、OpenCode、OpenClaw`)
+支持: Claude Code、Claude Desktop（Code）、Codex、Gemini CLI、Grok Build、OpenCode、OpenClaw、Hermes`)
 }
 
 func (r *runner) setup(args []string) error {
@@ -256,12 +256,22 @@ func detectEnvironments() ([]environment, error) {
 	}
 	definitions := []environment{
 		{Agent: "claude", Label: "Claude Code", Executable: "claude", Config: filepath.Join(home, ".claude", "settings.json")},
+		{Agent: "claude-desktop", Label: "Claude Desktop", Config: filepath.Join(home, ".claude", "settings.json")},
 		{Agent: "codex", Label: "Codex", Executable: "codex", Config: filepath.Join(home, ".codex", "config.toml")},
 		{Agent: "gemini", Label: "Gemini CLI", Executable: "gemini", Config: filepath.Join(home, ".gemini", "settings.json")},
+		{Agent: "grok", Label: "Grok Build", Executable: "grok", Config: filepath.Join(home, ".grok", "config.toml")},
 		{Agent: "opencode", Label: "OpenCode", Executable: "opencode", Config: filepath.Join(home, ".config", "opencode", "opencode.json")},
 		{Agent: "openclaw", Label: "OpenClaw", Executable: "openclaw", Config: filepath.Join(home, ".openclaw", "openclaw.json")},
+		{Agent: "hermes", Label: "Hermes", Executable: "hermes", Config: filepath.Join(home, ".hermes", "config.yaml")},
 	}
 	for index := range definitions {
+		if definitions[index].Agent == "claude-desktop" {
+			if path := findClaudeDesktop(home); path != "" {
+				definitions[index].Detected = true
+				definitions[index].Reason = path
+			}
+			continue
+		}
 		if path, lookupErr := exec.LookPath(definitions[index].Executable); lookupErr == nil {
 			definitions[index].Detected = true
 			definitions[index].Reason = path
@@ -271,6 +281,28 @@ func detectEnvironments() ([]environment, error) {
 		}
 	}
 	return definitions, nil
+}
+
+func findClaudeDesktop(home string) string {
+	candidates := []string{
+		filepath.Join(home, "Applications", "Claude.app"),
+		filepath.Join(home, "Library", "Application Support", "Claude", "claude_desktop_config.json"),
+		filepath.Join(home, ".config", "Claude", "claude_desktop_config.json"),
+		filepath.Join(home, ".config", "claude", "claude_desktop_config.json"),
+		"/Applications/Claude.app",
+	}
+	if localAppData := strings.TrimSpace(os.Getenv("LOCALAPPDATA")); localAppData != "" {
+		candidates = append(candidates,
+			filepath.Join(localAppData, "Programs", "Claude", "Claude.exe"),
+			filepath.Join(localAppData, "AnthropicClaude", "Claude.exe"),
+		)
+	}
+	for _, candidate := range candidates {
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+	return ""
 }
 
 func printEnvironments(out io.Writer, environments []environment) {
@@ -328,7 +360,11 @@ func parseAgents(raw string) ([]string, error) {
 	for _, agent := range configurator.SupportedAgents {
 		allowed[agent] = true
 	}
-	aliases := map[string]string{"claude-code": "claude", "gemini-cli": "gemini", "open-code": "opencode", "open-claw": "openclaw"}
+	aliases := map[string]string{
+		"claude-code": "claude", "claude_desktop": "claude-desktop",
+		"gemini-cli": "gemini", "grok-build": "grok",
+		"open-code": "opencode", "open-claw": "openclaw", "hermes-agent": "hermes",
+	}
 	seen := map[string]bool{}
 	var agents []string
 	for _, part := range strings.Split(raw, ",") {
@@ -567,11 +603,14 @@ func (r *runner) selectModels(agents, models []string, assumeYes bool) (map[stri
 
 func recommendedModel(agent string, models []string) string {
 	preferences := map[string][]string{
-		"claude":   {"claude-sonnet", "claude", "sonnet", "opus"},
-		"codex":    {"codex", "gpt-5", "gpt"},
-		"gemini":   {"gemini"},
-		"opencode": {"gpt-5", "codex", "claude", "gemini"},
-		"openclaw": {"gpt-5", "codex", "claude", "gemini"},
+		"claude":         {"claude-sonnet", "claude", "sonnet", "opus"},
+		"claude-desktop": {"claude-sonnet", "claude", "sonnet", "opus"},
+		"codex":          {"codex", "gpt-5", "gpt"},
+		"gemini":         {"gemini"},
+		"grok":           {"grok", "codex", "gpt-5", "claude"},
+		"opencode":       {"gpt-5", "codex", "claude", "gemini"},
+		"openclaw":       {"gpt-5", "codex", "claude", "gemini"},
+		"hermes":         {"hermes", "gpt-5", "codex", "claude", "gemini"},
 	}
 	for _, preference := range preferences[agent] {
 		for _, model := range models {
@@ -788,10 +827,23 @@ func (r *runner) token(args []string) error {
 
 func (r *runner) runAgent(args []string) error {
 	if len(args) == 0 {
-		return errors.New("用法: beeapi run <claude|codex|gemini|opencode|openclaw> [参数...]")
+		return errors.New("用法: beeapi run <claude|claude-desktop|codex|gemini|grok|opencode|openclaw|hermes> [参数...]")
 	}
 	agent := strings.ToLower(args[0])
-	commandName := map[string]string{"claude": "claude", "codex": "codex", "gemini": "gemini", "opencode": "opencode", "openclaw": "openclaw"}[agent]
+	if agent == "claude-desktop" {
+		cfg, err := r.store.LoadConfig()
+		if err != nil {
+			return err
+		}
+		if cfg.Endpoint == "" {
+			return errors.New("尚未完成首次设置，请先直接运行 beeapi")
+		}
+		return openURL("claude://code/new")
+	}
+	commandName := map[string]string{
+		"claude": "claude", "codex": "codex", "gemini": "gemini", "grok": "grok",
+		"opencode": "opencode", "openclaw": "openclaw", "hermes": "hermes",
+	}[agent]
 	if commandName == "" {
 		return fmt.Errorf("不支持的工具 %q", agent)
 	}
@@ -824,6 +876,19 @@ func agentEnvironment(agent string, cfg state.Config, secret string) []string {
 		return []string{"ANTHROPIC_AUTH_TOKEN=" + secret, "ANTHROPIC_BASE_URL=" + cfg.Endpoint + "/anthropic", "ANTHROPIC_MODEL=" + model}
 	case "gemini":
 		return []string{"GOOGLE_GEMINI_BASE_URL=" + cfg.Endpoint, "GEMINI_API_KEY=" + secret, "GEMINI_MODEL=" + model}
+	case "grok":
+		home, _ := os.UserHomeDir()
+		return []string{
+			"GROK_HOME=" + filepath.Join(home, ".config", "getbeeapi", "grok"),
+			"BEEAPI_API_KEY=" + secret,
+		}
+	case "hermes":
+		home, _ := os.UserHomeDir()
+		return []string{
+			"HERMES_HOME=" + filepath.Join(home, ".config", "getbeeapi", "hermes"),
+			"OPENAI_API_KEY=" + secret,
+			"HERMES_INFERENCE_MODEL=" + model,
+		}
 	default:
 		return nil
 	}

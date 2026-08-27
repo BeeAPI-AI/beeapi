@@ -1,3 +1,4 @@
+import Image from "next/image";
 import InstallCommands from "./InstallCommands";
 
 const phases = [
@@ -26,17 +27,20 @@ const phases = [
     number: "04",
     key: "APPLY",
     title: "完成配置",
-    description: "为多个智能体选择模型，统一备份后写入；任一步失败，都可以恢复整个配置批次。",
+    description: "为多个 AI 工具选择模型，统一备份后写入；任一步失败，都可以恢复整个配置批次。",
     note: "backup → merge → verify",
   },
 ];
 
 const agents = [
-  { name: "Claude Code", key: "CLAUDE", detail: "合并现有 settings.json" },
-  { name: "Codex", key: "CODEX", detail: "使用独立 beeapi profile" },
-  { name: "Gemini CLI", key: "GEMINI", detail: "安全注入运行环境" },
-  { name: "OpenCode", key: "OPENCODE", detail: "写入兼容 provider" },
-  { name: "OpenClaw", key: "OPENCLAW", detail: "同步 provider 与模型" },
+  { name: "Claude Code", key: "CLAUDE", kind: "编码 CLI", icon: "/tool-icons/claude.svg", detail: "合并现有 settings.json，保留权限与工具设置。" },
+  { name: "Claude Desktop", key: "DESKTOP", kind: "Code 模式", icon: "/tool-icons/claude.svg", detail: "与 Claude Code 共享配置，并可从 CLI 直接打开 Code。" },
+  { name: "Codex", key: "CODEX", kind: "编码 CLI", icon: "/tool-icons/codex.svg", detail: "建立独立 beeapi profile，不改动 ChatGPT 登录。" },
+  { name: "Gemini CLI", key: "GEMINI", kind: "编码 CLI", icon: "/tool-icons/gemini.svg", detail: "通过受保护运行环境注入入口、Key 与模型。" },
+  { name: "Grok Build", key: "GROK", kind: "编码 CLI", icon: "/tool-icons/grok.svg", detail: "使用专用 GROK_HOME 与官方 custom model 配置。" },
+  { name: "OpenCode", key: "OPENCODE", kind: "编码 CLI", icon: "/tool-icons/opencode.svg", detail: "深度合并 BeeAPI provider 与默认模型。" },
+  { name: "OpenClaw", key: "OPENCLAW", kind: "个人智能体", icon: "/tool-icons/openclaw.svg", detail: "同步 provider、模型列表与主模型选择。" },
+  { name: "Hermes", key: "HERMES", kind: "智能体 CLI", icon: "/tool-icons/hermes.svg", detail: "使用专用 HERMES_HOME 与 custom provider 启动。" },
 ];
 
 const endpoints = [
@@ -68,6 +72,10 @@ const faqs = [
     question: "BeeAPI 还没上线网页授权怎么办？",
     answer: "选择第二项，粘贴 BeeAPI 控制台生成的 API Key 即可。CLI 不会因此退回到账户密码登录。",
   },
+  {
+    question: "Claude Desktop 的普通聊天也会切换到 BeeAPI 吗？",
+    answer: "不会。GetBeeAPI 配置的是 Claude Desktop 中与 Claude Code 共用设置的 Code 模式；普通 Claude 聊天不支持替换底层模型入口。",
+  },
 ];
 
 function Brand() {
@@ -92,21 +100,27 @@ export default function Home() {
         <div className="header-inner shell">
           <a className="brand" href="#top" aria-label="GetBeeAPI 首页"><Brand /></a>
           <nav aria-label="主导航">
-            <a href="#workflow">CLI 能力</a>
+            <a href="#agents">支持工具</a>
+            <a href="#workflow">工作方式</a>
             <a href="#endpoints">访问入口</a>
             <a href="#auth">授权登录</a>
-            <a href="#agents">支持工具</a>
           </nav>
           <a className="header-action" href="#install">安装 beeapi</a>
         </div>
       </header>
 
       <section className="hero shell">
-        <div className="status-pill"><span />为 BeeAPI 用户打造的跨平台 CLI</div>
-        <h1 aria-label="BeeAPI，从一条命令开始。">BeeAPI，<br />从<span>一条命令</span>开始。</h1>
+        <div className="status-pill"><span />BEEAPI CONFIGURATOR · 8 TOOLS</div>
+        <h1 aria-label="把 BeeAPI，接入你常用的 AI 工具。">把 BeeAPI，接入你<br />常用的 <span>AI 工具。</span></h1>
         <p className="hero-description">
-          beeapi 会先选择可访问且响应更快的 BeeAPI 入口，再完成网页登录、Key 选择，并为 Codex、Claude Code 等工具准备好配置。
+          GetBeeAPI 是 BeeAPI 的快捷配置器。它识别本机已有工具，连接你的 BeeAPI Key 与模型，备份原配置后完成写入——不用再逐个寻找配置文件和字段。
         </p>
+
+        <div className="hero-positioning" aria-label="GetBeeAPI 产品定位">
+          <span>不替代你的 AI 工具</span>
+          <i aria-hidden="true" />
+          <span>只负责把 BeeAPI 接进去</span>
+        </div>
 
         <div className="hero-install" id="install">
           <InstallCommands />
@@ -117,7 +131,21 @@ export default function Home() {
           </div>
         </div>
 
-        <p className="hero-hint">安装完成后输入 <code>beeapi</code>，按自己的需要完成选择。</p>
+        <p className="hero-hint">安装完成后输入 <code>beeapi</code>：选择 Key、模型和需要配置的工具。</p>
+
+        <div className="hero-toolrail" aria-label="GetBeeAPI 支持的工具">
+          <p>一条命令，配置这些工具</p>
+          <div className="hero-tools">
+            {agents.map((agent) => (
+              <div key={agent.key} className="hero-tool">
+                <span className="tool-mark">
+                  <Image src={agent.icon} alt="" width={100} height={100} aria-hidden="true" />
+                </span>
+                <span>{agent.name}</span>
+              </div>
+            ))}
+          </div>
+        </div>
 
         <ol className="hero-flow" aria-label="beeapi 固定执行顺序">
           {phases.map((phase) => (
@@ -127,6 +155,54 @@ export default function Home() {
             </li>
           ))}
         </ol>
+      </section>
+
+      <section className="tools-section" id="agents">
+        <div className="shell">
+          <div className="tools-intro">
+            <div>
+              <p className="section-kicker">SUPPORTED TOOLS</p>
+              <h2>熟悉的工具，<br />现在都能接上 BeeAPI。</h2>
+            </div>
+            <div className="tools-intro-copy">
+              <span><i />当前版本 · 8 项适配</span>
+              <p>同时检查可执行文件与已有配置，推荐本机已安装的工具；你也可以预先配置尚未安装的工具。</p>
+            </div>
+          </div>
+
+          <div className="tool-grid">
+            {agents.map((agent, index) => (
+              <article className="tool-card" key={agent.key}>
+                <div className="tool-card-top">
+                  <span className="tool-mark">
+                    <Image src={agent.icon} alt="" width={100} height={100} aria-hidden="true" />
+                  </span>
+                  <span className="supported-badge"><i />已支持</span>
+                </div>
+                <div className="tool-card-copy">
+                  <span>{String(index + 1).padStart(2, "0")} · {agent.kind}</span>
+                  <h3>{agent.name}</h3>
+                  <p>{agent.detail}</p>
+                </div>
+                <code>{agent.key}</code>
+              </article>
+            ))}
+          </div>
+
+          <div className="tool-scope-note">
+            <span className="tool-scope-icon">i</span>
+            <p><strong>关于 Claude Desktop</strong>适配范围是其中的 Code 模式，它与 Claude Code 共享设置；普通 Claude 聊天仍使用 Anthropic 账户模型。</p>
+            <code>CLAUDE DESKTOP · CODE</code>
+          </div>
+
+          <div className="config-flow" aria-label="配置写入流程">
+            <span>环境扫描</span><i />
+            <span>多选工具</span><i />
+            <span>匹配模型</span><i />
+            <span>统一备份</span><i />
+            <span>写入验证</span>
+          </div>
+        </div>
       </section>
 
       <section className="endpoint-section shell" id="endpoints">
@@ -153,8 +229,8 @@ export default function Home() {
       <section className="content-section shell" id="workflow">
         <div className="section-heading centered-heading">
           <p className="section-kicker">HOW IT WORKS</p>
-          <h2>一个 CLI，接好 BeeAPI 的每一步。</h2>
-          <p>选择合适的访问线路，连接 BeeAPI 账户，再根据本地环境为常用 AI 工具生成配置。</p>
+          <h2>从 BeeAPI Key，到工具里的可用配置。</h2>
+          <p>GetBeeAPI 把入口选择、账户连接、环境识别和配置写入整理成一条可回滚的流程。</p>
         </div>
         <ol className="workflow-list">
           {phases.map((phase) => (
@@ -260,38 +336,6 @@ export default function Home() {
         </div>
       </section>
 
-      <section className="content-section shell" id="agents">
-        <div className="section-heading centered-heading agent-heading">
-          <p className="section-kicker">LOCAL ENVIRONMENT</p>
-          <h2>识别你已经在用的工具。</h2>
-          <p>同时检查可执行文件与已有配置。检测结果用于推荐，最终配置哪些工具仍由你多选决定。</p>
-        </div>
-
-        <div className="agent-panel">
-          <div className="agent-panel-top">
-            <span><i />环境扫描完成</span>
-            <b>已支持 {agents.length} 个工具</b>
-          </div>
-          <div className="agent-list">
-            {agents.map((agent, index) => (
-              <article key={agent.key}>
-                <span>{String(index + 1).padStart(2, "0")}</span>
-                <div><h3>{agent.name}</h3><p>{agent.detail}</p></div>
-                <code>{agent.key}</code>
-                <b>可配置</b>
-              </article>
-            ))}
-          </div>
-          <div className="config-flow" aria-label="配置写入流程">
-            <span>环境扫描</span><i />
-            <span>多选工具</span><i />
-            <span>匹配模型</span><i />
-            <span>统一备份</span><i />
-            <span>写入验证</span>
-          </div>
-        </div>
-      </section>
-
       <section className="content-section shell" id="security">
         <div className="security-shell">
           <div className="section-heading security-heading">
@@ -328,14 +372,14 @@ export default function Home() {
       <section className="final-cta shell">
         <div className="cta-glow" aria-hidden="true" />
         <span className="status-pill"><i />READY FOR BEEAPI</span>
-        <h2>把 BeeAPI 接入<br />你常用的 AI 工具。</h2>
-        <p>线路优选 → 账户连接 → 工具识别 → 配置完成</p>
+        <h2>你的工具不变，<br />现在接上 BeeAPI。</h2>
+        <p>8 项工具适配 · 自动识别 · 独立备份 · 一键回滚</p>
         <a className="primary-button" href="#install">安装 beeapi <span>↑</span></a>
       </section>
 
       <footer className="site-footer shell">
         <a className="brand" href="#top" aria-label="返回 GetBeeAPI 首页"><Brand /></a>
-        <p>为 BeeAPI 用户打造的线路优选与多智能体配置 CLI。</p>
+        <p>为 Claude Code、Codex 等现有 AI 工具快速配置 BeeAPI。</p>
         <nav aria-label="页脚导航">
           <a href="https://github.com/BeeAPI-AI/beeapi">GitHub <span>↗</span></a>
           <a href="#security">安全设计</a>

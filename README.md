@@ -1,10 +1,10 @@
 # GetBeeAPI
 
-GetBeeAPI 是面向 BeeAPI 用户的跨平台线路优选与多智能体配置助手。安装后运行 `beeapi`，按下面的顺序工作：
+GetBeeAPI 是把 BeeAPI 快速接入现有 AI 工具的跨平台配置器，不是一个新的智能体。安装后运行 `beeapi`，按下面的顺序工作：
 
 1. 检测 `beeapi.ai` 与 `beeapi.dev`；需要优选时，先筛选可访问的 Cloudflare IP，再按速度与稳定性排序，通过 TLS 与 API 复验后按需写入受管 Hosts。
 2. 让用户在 BeeAPI 网站授权登录并选择一枚已有 Key，或直接粘贴 API Key 作为兼容回退。
-3. 检测本机 Claude Code、Codex、Gemini CLI、OpenCode 与 OpenClaw。
+3. 检测本机 Claude Code、Claude Desktop（Code 模式）、Codex、Gemini CLI、Grok Build、OpenCode、OpenClaw 与 Hermes。
 4. 多选目标工具和模型，备份原配置后写入；失败自动回滚。
 
 CLI 永远不会询问 BeeAPI 账号密码。网站设备授权需要 BeeAPI 服务端实现 [设备授权契约](docs/device-authorization.md)；在接口上线前，可直接使用 API Key 模式。
@@ -46,6 +46,9 @@ beeapi network optimize        优选并验证 Cloudflare IP
 beeapi network restore         删除受管 Hosts 记录
 beeapi rollback latest         恢复最近一次配置备份
 beeapi run codex               用 BeeAPI profile 启动 Codex
+beeapi run grok                用独立 GROK_HOME 启动 Grok Build
+beeapi run hermes              用独立 HERMES_HOME 启动 Hermes
+beeapi run claude-desktop      打开 Claude Desktop 的 Code 模式
 ```
 
 详细流程见 [架构说明](docs/architecture.md)。
@@ -55,5 +58,5 @@ beeapi run codex               用 BeeAPI profile 启动 Codex
 - 只从 XIU2/CloudflareSpeedTest 的 GitHub Release API 下载测速组件，并校验 GitHub 提供的 SHA-256 摘要。
 - 优选 IP 必须以 BeeAPI 域名作为 SNI，通过 TLS 证书与业务接口双重验证后才能写入 Hosts。
 - Hosts 只写入带 `getbeeapi managed` 标记的区块；写入前备份，可独立移除。
-- 原有智能体配置会先做逐文件备份。Codex 使用独立 `beeapi` profile，不覆盖官方 ChatGPT 登录。
+- 原有工具配置会先做逐文件备份。Codex 使用独立 `beeapi` profile；Grok Build 与 Hermes 使用 GetBeeAPI 专用配置目录，不覆盖各自的官方登录与默认配置。
 - 凭据优先进入系统钥匙串；不可用时退回权限为 `0600` 的本地文件。

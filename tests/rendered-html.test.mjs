@@ -8,7 +8,8 @@ test("exports the GetBeeAPI product page for static hosting", async () => {
     "utf8",
   );
   assert.match(html, /<title>GetBeeAPI/);
-  assert.match(html, /BeeAPI，从一条命令开始/);
+  assert.match(html, /把 BeeAPI，接入你/);
+  assert.match(html, /不替代你的 AI 工具/);
   assert.match(html, /https:\/\/getbeeapi\.com\/og-v2\.png/);
   assert.doesNotMatch(html, /https:\/\/getbeeapi\.com\/og\.png/);
   assert.match(html, /curl -fsSL https:\/\/getbeeapi\.com\/install\.sh \| sh/);
@@ -17,6 +18,20 @@ test("exports the GetBeeAPI product page for static hosting", async () => {
   assert.match(html, /https:\/\/beeapi\.dev/);
   assert.match(html, /网页登录并选择 Key/);
   assert.match(html, /直接粘贴 API Key/);
+  for (const tool of [
+    "Claude Code",
+    "Claude Desktop",
+    "Codex",
+    "Gemini CLI",
+    "Grok Build",
+    "OpenCode",
+    "OpenClaw",
+    "Hermes",
+  ]) {
+    assert.match(html, new RegExp(tool));
+  }
+  assert.match(html, /当前版本 · 8 项适配/);
+  assert.match(html, /普通 Claude 聊天仍使用 Anthropic 账户模型/);
 
   const ordered = ["线路优选", "登录并选择 Key", "发现本地工具", "完成配置"];
   let previous = -1;

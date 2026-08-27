@@ -13,7 +13,16 @@ import (
 	"github.com/BeeAPI-AI/beeapi/internal/state"
 )
 
-var SupportedAgents = []string{"claude", "codex", "gemini", "opencode", "openclaw"}
+var SupportedAgents = []string{
+	"claude",
+	"claude-desktop",
+	"codex",
+	"gemini",
+	"grok",
+	"opencode",
+	"openclaw",
+	"hermes",
+}
 
 type Options struct {
 	Endpoint   string
@@ -54,24 +63,40 @@ func Apply(store *state.Store, options Options) (Result, error) {
 		return Result{}, fmt.Errorf("创建配置备份: %w", err)
 	}
 	result := Result{BackupID: backup.ID}
+	written := map[string]bool{}
 	for _, agent := range agents {
+		path := pathForAgent(home, agent)
+		if written[path] {
+			appendHint(&result, agent)
+			continue
+		}
 		if modelForAgent(options, agent) == "" {
 			return Result{}, fmt.Errorf("没有为 %s 选择模型", agent)
 		}
-		path := pathForAgent(home, agent)
 		if err := writeAgent(path, agent, options); err != nil {
 			_, _ = store.Rollback(backup.ID)
 			return Result{}, fmt.Errorf("写入 %s 配置失败（已自动回滚）: %w", agent, err)
 		}
+		written[path] = true
 		result.Files = append(result.Files, path)
-		switch agent {
-		case "codex":
-			result.Hints = append(result.Hints, "Codex: codex --profile beeapi（或 beeapi run codex）")
-		case "gemini":
-			result.Hints = append(result.Hints, "Gemini CLI: beeapi run gemini")
-		}
+		appendHint(&result, agent)
 	}
 	return result, nil
+}
+
+func appendHint(result *Result, agent string) {
+	switch agent {
+	case "claude-desktop":
+		result.Hints = append(result.Hints, "Claude Desktop: 打开 Code 标签页（与 Claude Code 共享配置）")
+	case "codex":
+		result.Hints = append(result.Hints, "Codex: codex --profile beeapi（或 beeapi run codex）")
+	case "gemini":
+		result.Hints = append(result.Hints, "Gemini CLI: beeapi run gemini")
+	case "grok":
+		result.Hints = append(result.Hints, "Grok Build: beeapi run grok")
+	case "hermes":
+		result.Hints = append(result.Hints, "Hermes: beeapi run hermes")
+	}
 }
 
 func normalizeAgents(input []string) ([]string, error) {
@@ -128,14 +153,21 @@ func pathForAgent(home, agent string) string {
 	switch agent {
 	case "claude":
 		return filepath.Join(home, ".claude", "settings.json")
+	case "claude-desktop":
+		// Claude Desktop Code sessions and Claude Code share this settings file.
+		return filepath.Join(home, ".claude", "settings.json")
 	case "codex":
 		return filepath.Join(home, ".codex", "beeapi.config.toml")
 	case "gemini":
 		return filepath.Join(home, ".config", "getbeeapi", "gemini.env")
+	case "grok":
+		return filepath.Join(home, ".config", "getbeeapi", "grok", "config.toml")
 	case "opencode":
 		return filepath.Join(home, ".config", "opencode", "opencode.json")
 	case "openclaw":
 		return filepath.Join(home, ".openclaw", "openclaw.json")
+	case "hermes":
+		return filepath.Join(home, ".config", "getbeeapi", "hermes", "config.yaml")
 	default:
 		return filepath.Join(home, ".config", "getbeeapi", agent+".json")
 	}
@@ -144,7 +176,7 @@ func pathForAgent(home, agent string) string {
 func writeAgent(path, agent string, options Options) error {
 	model := modelForAgent(options, agent)
 	switch agent {
-	case "claude":
+	case "claude", "claude-desktop":
 		return mergeJSON(path, map[string]any{
 			"env": map[string]any{
 				"ANTHROPIC_AUTH_TOKEN":           options.APIKey,
@@ -184,6 +216,19 @@ timeout_ms = 5000
 			"GEMINI_API_KEY=" + shellQuote(options.APIKey) + "\n" +
 			"GEMINI_MODEL=" + shellQuote(model) + "\n"
 		return secureWrite(path, []byte(content))
+	case "grok":
+		content := `# Managed by GetBeeAPI; use with: beeapi run grok
+[model.beeapi]
+model = ` + strconv.Quote(model) + `
+base_url = ` + strconv.Quote(options.Endpoint+"/v1") + `
+name = ` + strconv.Quote("BeeAPI · "+model) + `
+env_key = "BEEAPI_API_KEY"
+api_backend = "responses"
+
+[models]
+default = "beeapi"
+`
+		return secureWrite(path, []byte(content))
 	case "opencode":
 		return mergeJSON(path, map[string]any{
 			"$schema": "https://opencode.ai/config.json",
@@ -215,6 +260,14 @@ timeout_ms = 5000
 				},
 			},
 		})
+	case "hermes":
+		content := "# Managed by GetBeeAPI; use with: beeapi run hermes\n" +
+			"model:\n" +
+			"  default: " + strconv.Quote(model) + "\n" +
+			"  provider: custom\n" +
+			"  base_url: " + strconv.Quote(options.Endpoint+"/v1") + "\n" +
+			"  api_mode: chat_completions\n"
+		return secureWrite(path, []byte(content))
 	default:
 		return fmt.Errorf("未知智能体: %s", agent)
 	}

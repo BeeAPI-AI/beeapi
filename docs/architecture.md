@@ -6,7 +6,7 @@
 
 ```text
 beeapi
-  ├─ 1. 网络自救
+  ├─ 1. 访问线路选择
   │    ├─ 并发探测 beeapi.ai / beeapi.dev
   │    ├─ 选择延迟最低的可用入口
   │    └─ 均不可用 → CFST 优选 → TLS/业务校验 → 备份并写 Hosts
@@ -25,7 +25,7 @@ beeapi
 
 先修网络是必要条件：如果 BeeAPI 域名在当前网络不可达，网站授权和 API Key 校验都会失败。登录必须在环境识别之前，避免扫描完成后才发现无法获取模型和配置数据。
 
-## 网络自救
+## 访问线路选择
 
 内置入口只有 BeeAPI 官方返回的 `beeapi.ai` 与 `beeapi.dev`。探测使用 `/api/v1/public/api-endpoints`，并发执行，按成功状态和延迟排序。
 
@@ -64,12 +64,17 @@ beeapi
 | 工具 | 检测依据 | 写入方式 |
 | --- | --- | --- |
 | Claude Code | `claude` 或 `~/.claude/settings.json` | 深度合并 `settings.json` 的 BeeAPI 环境变量 |
+| Claude Desktop（Code） | Claude Desktop 应用或本地配置 | 使用与 Claude Code 共享的 `~/.claude/settings.json`；`beeapi run claude-desktop` 通过官方深链打开 Code 模式 |
 | Codex | `codex` 或 `~/.codex/config.toml` | 新建 `~/.codex/beeapi.config.toml` profile，使用 `beeapi token print` 命令取凭据 |
 | Gemini CLI | `gemini` 或 `~/.gemini/settings.json` | 写受保护 env 文件，由 `beeapi run gemini` 注入 |
+| Grok Build | `grok` 或 `~/.grok/config.toml` | 写 GetBeeAPI 专用 `GROK_HOME`，由 `beeapi run grok` 注入凭据并启动 |
 | OpenCode | `opencode` 或本地配置 | 深度合并 BeeAPI provider |
 | OpenClaw | `openclaw` 或本地配置 | 深度合并 BeeAPI provider 与默认模型 |
+| Hermes | `hermes` 或 `~/.hermes/config.yaml` | 写 GetBeeAPI 专用 `HERMES_HOME` custom provider，由 `beeapi run hermes` 注入凭据并启动 |
 
 每个工具可以选择不同模型。所有目标文件在第一次写入前归入同一个备份清单；任一写入失败就回滚整个批次。
+
+Claude Desktop 的适配范围是其中的 Code 模式：Anthropic 官方说明 Code 模式与 Claude Code 共享设置，因此能够使用 BeeAPI 配置。普通 Claude 聊天仍由 Anthropic 账户提供模型，不支持用本地配置替换底层 API，GetBeeAPI 不会把 MCP 连接伪装成模型替换。
 
 ## 发布与安装
 

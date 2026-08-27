@@ -14,11 +14,11 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   metadataBase: new URL("https://getbeeapi.com"),
-  title: "GetBeeAPI — BeeAPI CLI 与访问线路优选",
-  description: "面向 BeeAPI 用户的跨平台 CLI：自动检测 beeapi.ai、beeapi.dev，选择可访问且更快的线路，并配置 Codex、Claude Code 等 AI 工具。",
+  title: "GetBeeAPI — 为现有 AI 工具快速配置 BeeAPI",
+  description: "一条命令为 Claude Code、Claude Desktop、Codex、Gemini CLI、Grok Build、OpenCode、OpenClaw 与 Hermes 配置 BeeAPI。",
   openGraph: {
-    title: "GetBeeAPI — BeeAPI，从一条命令开始",
-    description: "BeeAPI 访问入口、线路优选、网页登录、Key 选择与多智能体配置。",
+    title: "GetBeeAPI — 把 BeeAPI 接入你已经在用的 AI 工具",
+    description: "识别本地工具，选择 BeeAPI Key 与模型，备份后完成配置。",
     type: "website",
     locale: "zh_CN",
     url: "https://getbeeapi.com",
@@ -32,8 +32,8 @@ export const metadata: Metadata = {
   },
   twitter: {
     card: "summary_large_image",
-    title: "GetBeeAPI — BeeAPI，从一条命令开始",
-    description: "线路优选 → 账户连接 → 工具识别 → 配置完成",
+    title: "GetBeeAPI — 为现有 AI 工具快速配置 BeeAPI",
+    description: "8 项工具适配 · 自动识别 · 独立备份 · 一键回滚",
     images: ["/og-v2.png"],
   },
   icons: {
