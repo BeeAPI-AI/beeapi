@@ -9,6 +9,8 @@ test("exports the GetBeeAPI product page for static hosting", async () => {
   );
   assert.match(html, /<title>GetBeeAPI/);
   assert.match(html, /BeeAPI，从一条命令开始/);
+  assert.match(html, /https:\/\/getbeeapi\.com\/og-v2\.png/);
+  assert.doesNotMatch(html, /https:\/\/getbeeapi\.com\/og\.png/);
   assert.match(html, /curl -fsSL https:\/\/getbeeapi\.com\/install\.sh \| sh/);
   assert.match(html, /BeeAPI 访问入口/);
   assert.match(html, /https:\/\/beeapi\.ai/);
@@ -39,4 +41,14 @@ test("ships matching verified installers", async () => {
   assert.match(powerShell, /github\.com\/BeeAPI-AI\/beeapi\/releases/);
   assert.match(powerShell, /& \$Target/);
   assert.match(component, /irm https:\/\/getbeeapi\.com\/install\.ps1 \| iex/);
+});
+
+test("ships the versioned social preview at Open Graph dimensions", async () => {
+  const image = await readFile(
+    new URL("../public/og-v2.png", import.meta.url),
+  );
+
+  assert.deepEqual([...image.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10]);
+  assert.equal(image.readUInt32BE(16), 1200);
+  assert.equal(image.readUInt32BE(20), 630);
 });

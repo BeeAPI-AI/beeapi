@@ -23,13 +23,18 @@ export const metadata: Metadata = {
     locale: "zh_CN",
     url: "https://getbeeapi.com",
     siteName: "GetBeeAPI",
-    images: [{ url: "/og.png", width: 1200, height: 630, alt: "GetBeeAPI — BeeAPI CLI 与访问线路优选" }],
+    images: [{
+      url: "/og-v2.png",
+      width: 1200,
+      height: 630,
+      alt: "GetBeeAPI — 一条命令，接好 BeeAPI 与你的 AI 工具",
+    }],
   },
   twitter: {
     card: "summary_large_image",
     title: "GetBeeAPI — BeeAPI，从一条命令开始",
     description: "线路优选 → 账户连接 → 工具识别 → 配置完成",
-    images: ["/og.png"],
+    images: ["/og-v2.png"],
   },
   icons: {
     icon: "/favicon.png",
