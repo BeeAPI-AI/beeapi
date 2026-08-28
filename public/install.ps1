@@ -16,15 +16,23 @@ switch ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToSt
 
 $Asset = "beeapi_windows_$Arch.zip"
 if ($env:BEEAPI_DOWNLOAD_BASE) {
-  $Base = $env:BEEAPI_DOWNLOAD_BASE.TrimEnd("/")
+  $Bases = @($env:BEEAPI_DOWNLOAD_BASE.TrimEnd("/"))
 } elseif ($Version -eq "latest") {
-  $Base = "https://github.com/BeeAPI-AI/beeapi/releases/latest/download"
+  $Bases = @(
+    "https://getbeeapi.com/releases/latest/download",
+    "https://github.com/BeeAPI-AI/beeapi/releases/latest/download"
+  )
 } else {
-  $Base = "https://github.com/BeeAPI-AI/beeapi/releases/download/$Version"
+  $Bases = @(
+    "https://getbeeapi.com/releases/$Version/download",
+    "https://github.com/BeeAPI-AI/beeapi/releases/download/$Version"
+  )
 }
 
-if (-not $Base.StartsWith("https://")) {
-  throw "Download base must use HTTPS"
+foreach ($CandidateBase in $Bases) {
+  if (-not $CandidateBase.StartsWith("https://")) {
+    throw "Download base must use HTTPS"
+  }
 }
 
 $TempDir = Join-Path ([IO.Path]::GetTempPath()) ("getbeeapi-" + [Guid]::NewGuid().ToString("N"))
@@ -33,14 +41,27 @@ New-Item -ItemType Directory -Path $TempDir | Out-Null
 try {
   $Archive = Join-Path $TempDir $Asset
   $Checksum = "$Archive.sha256"
-  Write-Host "Downloading $Asset…"
-  Invoke-WebRequest -UseBasicParsing -Uri "$Base/$Asset" -OutFile $Archive
-  Invoke-WebRequest -UseBasicParsing -Uri "$Base/$Asset.sha256" -OutFile $Checksum
+  $Downloaded = $false
+  foreach ($CandidateBase in $Bases) {
+    try {
+      Remove-Item -LiteralPath $Archive, $Checksum -Force -ErrorAction SilentlyContinue
+      Write-Host "Downloading $Asset from $CandidateBase…"
+      Invoke-WebRequest -UseBasicParsing -Uri "$CandidateBase/$Asset" -OutFile $Archive
+      Invoke-WebRequest -UseBasicParsing -Uri "$CandidateBase/$Asset.sha256" -OutFile $Checksum
 
-  $Expected = (Get-Content -Raw -LiteralPath $Checksum).Trim().ToLowerInvariant()
-  $Actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $Archive).Hash.ToLowerInvariant()
-  if ($Expected -ne $Actual) {
-    throw "SHA-256 verification failed"
+      $Expected = (Get-Content -Raw -LiteralPath $Checksum).Trim().ToLowerInvariant()
+      $Actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $Archive).Hash.ToLowerInvariant()
+      if ($Expected -notmatch "^[0-9a-f]{64}$" -or $Expected -ne $Actual) {
+        throw "SHA-256 verification failed for this source"
+      }
+      $Downloaded = $true
+      break
+    } catch {
+      Write-Warning "This source is unavailable; trying the next verified source."
+    }
+  }
+  if (-not $Downloaded) {
+    throw "Unable to download the BeeAPI release from any source."
   }
 
   $Extracted = Join-Path $TempDir "extracted"
@@ -54,11 +75,15 @@ try {
   if ($Parts -notcontains $InstallDir) {
     $NewPath = (@($Parts) + $InstallDir) -join ";"
     [Environment]::SetEnvironmentVariable("Path", $NewPath, "User")
-    $env:Path = "$env:Path;$InstallDir"
     Write-Host "Added $InstallDir to your user PATH."
+  }
+  $CurrentParts = @($env:Path -split ";" | Where-Object { $_ })
+  if ($CurrentParts -notcontains $InstallDir) {
+    $env:Path = "$env:Path;$InstallDir"
   }
 
   Write-Host "`nInstalled beeapi to $Target"
+  Write-Host "The command is ready: beeapi"
   if (-not $NoSetup) {
     & $Target
   }

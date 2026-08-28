@@ -23,13 +23,23 @@ import (
 )
 
 type runner struct {
-	ctx     context.Context
-	version string
-	in      io.Reader
-	reader  *bufio.Reader
-	out     io.Writer
-	errOut  io.Writer
-	store   *state.Store
+	ctx       context.Context
+	version   string
+	in        io.Reader
+	reader    *bufio.Reader
+	out       io.Writer
+	errOut    io.Writer
+	store     *state.Store
+	logoShown bool
+}
+
+type credentialMaterial struct {
+	ID           string
+	Name         string
+	Prefix       string
+	SourcePrefix string
+	Secret       string
+	Models       []string
 }
 
 func Run(ctx context.Context, args []string, version string, in io.Reader, out, errOut io.Writer) error {
@@ -49,13 +59,24 @@ func Run(ctx context.Context, args []string, version string, in io.Reader, out, 
 	}
 	r := &runner{ctx: ctx, version: version, in: in, reader: bufio.NewReader(in), out: out, errOut: errOut, store: store}
 	if len(args) == 0 {
-		return r.setup(nil)
+		cfg, loadErr := store.LoadConfig()
+		if loadErr != nil {
+			return loadErr
+		}
+		if !cfg.Initialized() {
+			return r.setup(nil)
+		}
+		return r.home()
 	}
 	switch args[0] {
 	case "setup", "init":
 		return r.setup(args[1:])
 	case "detect":
 		return r.detect()
+	case "status":
+		return r.status()
+	case "login", "connect":
+		return r.reconnect()
 	case "configure", "config":
 		return r.configure(args[1:])
 	case "network":
@@ -75,8 +96,10 @@ func printHelp(out io.Writer) {
 	fmt.Fprintln(out, `beeapi — 为现有 AI 工具快速配置 BeeAPI
 
 用法:
-  beeapi                         启动完整向导
-  beeapi setup                   重新运行完整向导
+  beeapi                         首次运行初始化；以后打开功能主页
+  beeapi setup                   重新运行首次设置
+  beeapi status                  查看当前连接与工具配置
+  beeapi login                   重新授权或更新密钥配置
   beeapi detect                  检查本机已安装的 AI CLI
   beeapi configure               使用已保存凭据重新配置
   beeapi network status          检测内置 API 域名
@@ -84,7 +107,7 @@ func printHelp(out io.Writer) {
   beeapi network restore         移除 beeapi 管理的 Hosts 记录
   beeapi rollback [latest|编号]  恢复配置备份
   beeapi run <工具> [参数...]    用 BeeAPI 配置启动目标工具
-  beeapi token print             仅向标准输出打印已保存的 API Key
+  beeapi token print [--agent 工具] 仅向目标工具提供已保存的 API Key
 
 支持: Claude Code、Claude Desktop（Code）、Codex、Gemini CLI、Grok Build、OpenCode、OpenClaw、Hermes`)
 }
@@ -103,24 +126,36 @@ func (r *runner) setup(args []string) error {
 		return err
 	}
 
-	fmt.Fprintln(r.out, "\nBeeAPI 本地配置向导")
+	r.showLogo()
+	fmt.Fprintln(r.out, "\n首次设置 · 连接 BeeAPI 并配置现有 AI 工具")
 	fmt.Fprintln(r.out, "────────────────────────────────────────")
 	endpoint, err := r.resolveEndpoint(endpointFlag, assumeYes)
 	if err != nil {
 		return err
 	}
 
+	fmt.Fprintln(r.out, "\n[2/3] 连接 BeeAPI 并读取可用配置")
 	apiKey := strings.TrimSpace(apiKeyFlag)
 	if apiKey == "" {
 		apiKey = strings.TrimSpace(os.Getenv("BEEAPI_API_KEY"))
 	}
-	keyName := ""
+	var credentials []credentialMaterial
 	if apiKey == "" {
-		apiKey, keyName, err = r.authorize(endpoint, noOpen)
+		credentials, err = r.authorize(endpoint, noOpen)
 		if err != nil {
 			return err
 		}
+	} else {
+		fmt.Fprintln(r.out, "  使用命令行或环境变量提供的单个 API Key（兼容模式）。")
+		credentials = []credentialMaterial{{ID: "manual", Name: "手动 API Key", Prefix: safeKeyPrefix(apiKey), Secret: apiKey}}
 	}
+	credentials, err = r.discoverCredentialModels(endpoint, credentials)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(r.out, "  ✓ 已连接 BeeAPI · 已领取 %d 个配置\n", len(credentials))
+
+	fmt.Fprintln(r.out, "\n[3/3] 选择工具、密钥配置与模型")
 	environments, err := detectEnvironments()
 	if err != nil {
 		return err
@@ -130,43 +165,38 @@ func (r *runner) setup(args []string) error {
 	if err != nil {
 		return err
 	}
-
-	client := beeapi.New(endpoint)
-	modelCtx, cancel := context.WithTimeout(r.ctx, 15*time.Second)
-	models, err := client.Models(modelCtx, apiKey)
-	cancel()
-	if err != nil {
-		return fmt.Errorf("API Key 校验或模型发现失败: %w", err)
-	}
-	if len(models) == 0 {
-		return errors.New("该 API Key 当前没有可用模型")
-	}
-	selectedModels, err := r.selectModels(agents, models, assumeYes)
+	assignments, err := r.selectCredentialAssignments(agents, credentials, nil, assumeYes)
 	if err != nil {
 		return err
 	}
-	backend, err := r.store.SaveCredential(apiKey)
+	selectedModels, err := r.selectModelsForAssignments(agents, credentials, assignments, assumeYes)
+	if err != nil {
+		return err
+	}
+	apiKeys, err := apiKeysForAssignments(agents, credentials, assignments)
 	if err != nil {
 		return err
 	}
 	binaryPath, _ := os.Executable()
 	result, err := configurator.Apply(r.store, configurator.Options{
-		Endpoint: endpoint, APIKey: apiKey, Models: selectedModels,
+		Endpoint: endpoint, APIKeys: apiKeys, Models: selectedModels,
 		Agents: agents, BinaryPath: binaryPath,
 	})
 	if err != nil {
 		return err
 	}
+	storedCredentials, err := r.saveCredentialMaterials(credentials)
+	if err != nil {
+		_, _ = r.store.Rollback(result.BackupID)
+		return err
+	}
 	cfg := state.Config{
-		Endpoint: endpoint, KeyName: keyName, Models: selectedModels, Agents: agents,
-		BinaryPath: binaryPath, CredentialBackend: backend,
+		Endpoint: endpoint, KeyName: credentialSummaryName(storedCredentials), Models: selectedModels, Agents: agents,
+		Credentials: storedCredentials, AgentCredentials: assignments, BinaryPath: binaryPath,
 	}
-	if model := selectedModels["codex"]; model != "" {
-		cfg.DefaultModel = model
-	} else if len(agents) > 0 {
-		cfg.DefaultModel = selectedModels[agents[0]]
-	}
+	setDefaultModel(&cfg, agents, selectedModels)
 	if err := r.store.SaveConfig(cfg); err != nil {
+		_, _ = r.store.Rollback(result.BackupID)
 		return err
 	}
 
@@ -177,46 +207,79 @@ func (r *runner) setup(args []string) error {
 	for _, hint := range result.Hints {
 		fmt.Fprintln(r.out, "  "+hint)
 	}
-	fmt.Fprintln(r.out, "\n以后可运行 beeapi 重新检测，或运行 beeapi rollback latest 回滚。")
+	fmt.Fprintln(r.out, "\n以后直接输入 beeapi 打开功能主页；不会再次自动运行首次设置。")
 	return nil
 }
 
 func (r *runner) resolveEndpoint(explicit string, assumeYes bool) (string, error) {
-	fmt.Fprintln(r.out, "\n[1/4] 检测 BeeAPI 网络入口")
+	fmt.Fprintln(r.out, "\n[1/3] 检测 BeeAPI 官方入口")
 	var endpoints []beeapi.Endpoint
 	if explicit != "" {
-		endpoints = beeapi.ProbeEndpoints(r.ctx, []beeapi.Endpoint{{Name: "指定入口", BaseURL: strings.TrimRight(explicit, "/")}})
+		normalized := beeapi.NormalizeBaseURL(explicit)
+		if normalized == "" {
+			return "", errors.New("指定入口必须是有效的 HTTPS 根地址")
+		}
+		endpoints = beeapi.ProbeEndpoints(r.ctx, []beeapi.Endpoint{{Name: "指定入口", BaseURL: normalized}})
 	} else {
 		endpoints = beeapi.DiscoverEndpoints(r.ctx, nil)
 	}
 	printEndpoints(r.out, endpoints)
 	best, err := beeapi.BestEndpoint(endpoints)
 	if err != nil {
-		fmt.Fprintln(r.out, "  两个内置域名均不可用，开始 Cloudflare IP 优选与 TLS 校验。")
-		if _, recoverErr := r.optimizeAndMaybeApply("beeapi.ai", true, assumeYes); recoverErr != nil {
+		if len(endpoints) == 0 {
+			return "", err
+		}
+		target := endpoints[0]
+		if !assumeYes && explicit == "" && len(endpoints) > 1 {
+			answer, readErr := r.ask("  所有入口均不可用；选择要尝试修复的域名 [1]: ")
+			if readErr != nil && !errors.Is(readErr, io.EOF) {
+				return "", readErr
+			}
+			if index, ok := endpointChoice(answer, len(endpoints)); ok {
+				target = endpoints[index]
+			} else if strings.TrimSpace(answer) != "" {
+				return "", errors.New("入口编号无效")
+			}
+		}
+		fmt.Fprintf(r.out, "  %s 当前不可用，开始 Cloudflare IP 优选与 TLS 校验。\n", target.BaseURL)
+		if _, recoverErr := r.optimizeAndMaybeApply(hostFromURL(target.BaseURL), true, assumeYes); recoverErr != nil {
 			return "", fmt.Errorf("自动修复网络失败: %w", recoverErr)
 		}
-		endpoints = beeapi.DiscoverEndpoints(r.ctx, nil)
-		printEndpoints(r.out, endpoints)
-		best, err = beeapi.BestEndpoint(endpoints)
-		if err != nil {
+		rechecked := beeapi.ProbeEndpoints(r.ctx, []beeapi.Endpoint{{Name: target.Name, BaseURL: target.BaseURL}})
+		if len(rechecked) != 1 || !rechecked[0].Reachable {
 			return "", errors.New("Hosts 修复后仍无法访问 BeeAPI，请运行 beeapi network restore 后检查代理、防火墙或运营商网络")
 		}
-		return best.BaseURL, nil
+		fmt.Fprintf(r.out, "  已选择 %s（%s）\n", rechecked[0].BaseURL, durationLabel(rechecked[0].Latency))
+		return rechecked[0].BaseURL, nil
 	}
 	if !assumeYes && explicit == "" {
-		answer, readErr := r.ask("  回车使用最快可用域名；输入 o 继续优选 Cloudflare IP: ")
-		if readErr != nil {
+		answer, readErr := r.ask("  回车使用最快可用入口；也可输入编号选择其他入口: ")
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
 			return "", readErr
 		}
-		if strings.EqualFold(strings.TrimSpace(answer), "o") {
-			if _, optErr := r.optimizeAndMaybeApply(hostFromURL(best.BaseURL), false, false); optErr != nil {
-				return "", optErr
+		if index, ok := endpointChoice(answer, len(endpoints)); ok {
+			selected := endpoints[index]
+			if !selected.Reachable {
+				confirm, confirmErr := r.ask(fmt.Sprintf("  %s 不可访问，尝试优选 IP 并写入 Hosts？[Y/n]: ", selected.BaseURL))
+				if confirmErr != nil && !errors.Is(confirmErr, io.EOF) {
+					return "", confirmErr
+				}
+				if strings.EqualFold(strings.TrimSpace(confirm), "n") {
+					return "", errors.New("所选入口不可用")
+				}
+				// The user already approved the Hosts change in the prompt above.
+				if _, optErr := r.optimizeAndMaybeApply(hostFromURL(selected.BaseURL), true, true); optErr != nil {
+					return "", optErr
+				}
+				rechecked := beeapi.ProbeEndpoints(r.ctx, []beeapi.Endpoint{selected})
+				if len(rechecked) != 1 || !rechecked[0].Reachable {
+					return "", errors.New("优选后所选入口仍不可用")
+				}
+				selected = rechecked[0]
 			}
-			endpoints = beeapi.DiscoverEndpoints(r.ctx, nil)
-			if optimized, bestErr := beeapi.BestEndpoint(endpoints); bestErr == nil {
-				best = optimized
-			}
+			best = selected
+		} else if strings.TrimSpace(answer) != "" {
+			return "", errors.New("入口编号无效")
 		}
 	}
 	fmt.Fprintf(r.out, "  已选择 %s（%s）\n", best.BaseURL, durationLabel(best.Latency))
@@ -224,13 +287,25 @@ func (r *runner) resolveEndpoint(explicit string, assumeYes bool) (string, error
 }
 
 func printEndpoints(out io.Writer, endpoints []beeapi.Endpoint) {
-	for _, endpoint := range endpoints {
+	for index, endpoint := range endpoints {
 		if endpoint.Reachable {
-			fmt.Fprintf(out, "  ✓ %-12s %-24s %s\n", endpoint.Name, endpoint.BaseURL, durationLabel(endpoint.Latency))
+			fmt.Fprintf(out, "  %d. ✓ %-10s %-24s %s\n", index+1, endpoint.Name, endpoint.BaseURL, durationLabel(endpoint.Latency))
 		} else {
-			fmt.Fprintf(out, "  × %-12s %-24s 不可用\n", endpoint.Name, endpoint.BaseURL)
+			fmt.Fprintf(out, "  %d. × %-10s %-24s 不可用\n", index+1, endpoint.Name, endpoint.BaseURL)
 		}
 	}
+}
+
+func endpointChoice(value string, total int) (int, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, false
+	}
+	number, err := strconv.Atoi(value)
+	if err != nil || number < 1 || number > total {
+		return 0, false
+	}
+	return number - 1, true
 }
 
 func durationLabel(value time.Duration) string {
@@ -306,7 +381,7 @@ func findClaudeDesktop(home string) string {
 }
 
 func printEnvironments(out io.Writer, environments []environment) {
-	fmt.Fprintln(out, "\n[3/4] 检查本地 AI CLI 环境")
+	fmt.Fprintln(out, "  本机工具环境")
 	for index, env := range environments {
 		status := "未检测到（仍可预配置）"
 		mark := "○"
@@ -389,20 +464,19 @@ func parseAgents(raw string) ([]string, error) {
 	return agents, nil
 }
 
-func (r *runner) authorize(endpoint string, noOpen bool) (string, string, error) {
-	fmt.Fprintln(r.out, "\n[2/4] 登录 BeeAPI")
-	fmt.Fprintln(r.out, "  1. 跳转网站授权登录（推荐；支持现有登录、OAuth 与 2FA）")
+func (r *runner) authorize(endpoint string, noOpen bool) ([]credentialMaterial, error) {
+	fmt.Fprintln(r.out, "  1. 跳转网站授权登录（推荐；可在网页选择 1–10 个密钥配置）")
 	fmt.Fprintln(r.out, "  2. 直接粘贴 API Key（兼容回退）")
 	choice, err := r.ask("  请选择 [1]: ")
 	if err != nil && !errors.Is(err, io.EOF) {
-		return "", "", err
+		return nil, err
 	}
 	choice = strings.TrimSpace(choice)
 	if choice == "2" {
 		return r.pasteAPIKey(endpoint)
 	}
 	if choice != "" && choice != "1" {
-		return "", "", errors.New("登录方式只能选择 1 或 2")
+		return nil, errors.New("登录方式只能选择 1 或 2")
 	}
 	client := beeapi.New(endpoint)
 	deviceCtx, cancel := context.WithTimeout(r.ctx, 8*time.Second)
@@ -418,11 +492,11 @@ func (r *runner) authorize(endpoint string, noOpen bool) (string, string, error)
 		if !noOpen && verifyURL != "" {
 			_ = openURL(verifyURL)
 		}
-		key, keyName, pollErr := r.pollDevice(client, code)
+		credentials, pollErr := r.pollDevice(client, code)
 		if pollErr == nil {
-			return key, keyName, nil
+			return credentials, nil
 		}
-		return "", "", pollErr
+		return nil, pollErr
 	}
 	var apiErr *beeapi.APIError
 	if err != nil && (!errors.As(err, &apiErr) || (apiErr.Status != 404 && apiErr.Status != 405 && apiErr.Status != 501)) {
@@ -433,22 +507,29 @@ func (r *runner) authorize(endpoint string, noOpen bool) (string, string, error)
 	fmt.Fprintln(r.out, "  CLI 不会要求或接收 BeeAPI 账户密码。")
 	fallback, askErr := r.ask("  是否改用粘贴 API Key？[Y/n]: ")
 	if askErr != nil && !errors.Is(askErr, io.EOF) {
-		return "", "", askErr
+		return nil, askErr
 	}
 	if strings.EqualFold(strings.TrimSpace(fallback), "n") {
-		return "", "", errors.New("网站授权未完成")
+		return nil, errors.New("网站授权未完成")
 	}
 	return r.pasteAPIKey(endpoint)
 }
 
-func (r *runner) pasteAPIKey(endpoint string) (string, string, error) {
+func (r *runner) pasteAPIKey(endpoint string) ([]credentialMaterial, error) {
 	fmt.Fprintln(r.out, "  兼容模式：请从 BeeAPI 控制台复制 API Key。")
 	fmt.Fprintf(r.out, "  控制台: %s/api-keys\n", endpoint)
 	secret, readErr := r.readSecret("  粘贴 API Key: ")
-	return strings.TrimSpace(secret), "manual", readErr
+	if readErr != nil {
+		return nil, readErr
+	}
+	secret = strings.TrimSpace(secret)
+	if secret == "" {
+		return nil, errors.New("API Key 不能为空")
+	}
+	return []credentialMaterial{{ID: "manual", Name: "手动 API Key", Prefix: safeKeyPrefix(secret), Secret: secret}}, nil
 }
 
-func (r *runner) pollDevice(client *beeapi.Client, code beeapi.DeviceCode) (string, string, error) {
+func (r *runner) pollDevice(client *beeapi.Client, code beeapi.DeviceCode) ([]credentialMaterial, error) {
 	interval := code.Interval
 	if interval < 2 {
 		interval = 5
@@ -464,10 +545,10 @@ func (r *runner) pollDevice(client *beeapi.Client, code beeapi.DeviceCode) (stri
 		select {
 		case <-r.ctx.Done():
 			timer.Stop()
-			return "", "", r.ctx.Err()
+			return nil, r.ctx.Err()
 		case <-deadline.C:
 			timer.Stop()
-			return "", "", errors.New("设备授权已过期，请重新运行 beeapi")
+			return nil, errors.New("设备授权已过期，请重新运行 beeapi")
 		case <-timer.C:
 			pollCtx, cancel := context.WithTimeout(r.ctx, 10*time.Second)
 			token, err := client.PollDeviceAuth(pollCtx, code.DeviceCode)
@@ -481,124 +562,314 @@ func (r *runner) pollDevice(client *beeapi.Client, code beeapi.DeviceCode) (stri
 					interval += 5
 					continue
 				}
-				return "", "", err
+				return nil, err
 			}
 			if token.Pending {
 				continue
 			}
 			if token.Error != "" {
-				return "", "", errors.New(token.Error)
+				return nil, errors.New(token.Error)
 			}
 			accessToken := token.AccessToken
 			if accessToken == "" {
 				accessToken = token.Token
 			}
 			if accessToken == "" {
-				return "", "", errors.New("设备授权完成，但 BeeAPI 没有返回 CLI 登录令牌")
+				return nil, errors.New("设备授权完成，但 BeeAPI 没有返回 CLI 登录令牌")
+			}
+			if token.TokenType != "" && !strings.EqualFold(token.TokenType, "DPoP") {
+				return nil, fmt.Errorf("BeeAPI 返回了不支持的 CLI 令牌类型 %q", token.TokenType)
 			}
 			client.Token = accessToken
-			key, name, chooseErr := r.chooseAccountAPIKey(client)
+			claim, claimErr := r.claimDeviceCredentials(client)
 			client.Token = ""
-			return key, name, chooseErr
+			if claimErr != nil {
+				return nil, fmt.Errorf("领取 BeeAPI 设备凭据: %w", claimErr)
+			}
+			credentials := make([]credentialMaterial, 0, len(claim.Credentials))
+			fmt.Fprintln(r.out, "  ✓ 网站授权完成，已领取设备专用配置:")
+			for _, item := range claim.Credentials {
+				name := strings.TrimSpace(item.ProfileName)
+				if name == "" {
+					name = strings.TrimSpace(item.DeviceKeyName)
+				}
+				if name == "" {
+					name = "BeeAPI 配置"
+				}
+				fmt.Fprintf(r.out, "    • %s · %s\n", name, item.DeviceKeyPrefix)
+				credentials = append(credentials, credentialMaterial{
+					ID: item.CredentialID, Name: name, Prefix: item.DeviceKeyPrefix,
+					SourcePrefix: item.SourceKeyPrefix, Secret: item.APIKey,
+				})
+			}
+			return credentials, nil
 		}
 	}
 }
 
-func (r *runner) chooseAccountAPIKey(client *beeapi.Client) (string, string, error) {
-	ctx, cancel := context.WithTimeout(r.ctx, 12*time.Second)
-	keys, err := client.CLIAPIKeys(ctx)
-	cancel()
-	if err != nil {
-		return "", "", fmt.Errorf("读取 BeeAPI API Key 列表: %w", err)
-	}
-	if len(keys) == 0 {
-		return "", "", errors.New("BeeAPI 账户中没有可导出的 API Key，请先在控制台创建")
-	}
-	fmt.Fprintln(r.out, "  网站授权成功。请选择这次用于本地工具的 BeeAPI API Key:")
-	selectable := 0
-	defaultSelection := -1
-	for index, key := range keys {
-		prefix := key.KeyPrefix
-		if prefix == "" {
-			prefix = key.Prefix
+func (r *runner) claimDeviceCredentials(client *beeapi.Client) (beeapi.CLICredentialClaimResult, error) {
+	var claim beeapi.CLICredentialClaimResult
+	for attempt := 0; attempt < 2; attempt++ {
+		claimCtx, cancel := context.WithTimeout(r.ctx, 15*time.Second)
+		result, err := client.ClaimCLICredentials(claimCtx)
+		cancel()
+		if err == nil {
+			return result, nil
 		}
-		parts := []string{}
-		for _, part := range []string{prefix, key.GroupName, key.Status} {
-			if strings.TrimSpace(part) != "" {
-				parts = append(parts, strings.TrimSpace(part))
-			}
+		claim = result
+		if attempt != 0 || r.ctx.Err() != nil || !retryableClaimError(err) {
+			return claim, err
 		}
-		status := ""
-		if !key.Exportable {
-			status = " [不可导出]"
-		} else {
-			selectable++
-			if defaultSelection == -1 {
-				defaultSelection = index
-			}
-		}
-		fmt.Fprintf(r.out, "    %d. %s%s", index+1, key.Name, status)
-		if len(parts) > 0 {
-			fmt.Fprintf(r.out, " (%s)", strings.Join(parts, " · "))
-		}
-		fmt.Fprintln(r.out)
+		fmt.Fprintln(r.out, "  领取响应中断，正在使用幂等窗口安全重试…")
 	}
-	if selectable == 0 {
-		return "", "", errors.New("账户中的 API Key 都不可导出；请改用手动粘贴或在控制台创建可导出的 Key")
-	}
-	answer, readErr := r.ask(fmt.Sprintf("  Key 编号 [%d]: ", defaultSelection+1))
-	if readErr != nil && !errors.Is(readErr, io.EOF) {
-		return "", "", readErr
-	}
-	selected := defaultSelection
-	if strings.TrimSpace(answer) != "" {
-		number, convErr := strconv.Atoi(strings.TrimSpace(answer))
-		if convErr != nil || number < 1 || number > len(keys) {
-			return "", "", errors.New("API Key 编号无效")
-		}
-		selected = number - 1
-	}
-	if !keys[selected].Exportable {
-		return "", "", errors.New("所选 API Key 不允许导出，请选择其他 Key 或使用手动粘贴")
-	}
-	exportCtx, exportCancel := context.WithTimeout(r.ctx, 12*time.Second)
-	secret, err := client.ExportCLIAPIKey(exportCtx, keys[selected].ID)
-	exportCancel()
-	if err != nil {
-		return "", "", fmt.Errorf("领取所选 API Key: %w", err)
-	}
-	return secret, keys[selected].Name, nil
+	return claim, errors.New("领取 BeeAPI 设备凭据失败")
 }
 
-func (r *runner) selectModels(agents, models []string, assumeYes bool) (map[string]string, error) {
+func retryableClaimError(err error) bool {
+	var apiErr *beeapi.APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.Status >= 500
+	}
+	return !errors.Is(err, context.Canceled)
+}
+
+func safeKeyPrefix(secret string) string {
+	secret = strings.TrimSpace(secret)
+	if secret == "" {
+		return ""
+	}
+	visible := min(len(secret), 8)
+	return secret[:visible] + "…"
+}
+
+func (r *runner) discoverCredentialModels(endpoint string, credentials []credentialMaterial) ([]credentialMaterial, error) {
+	if len(credentials) == 0 {
+		return nil, errors.New("没有可用的 BeeAPI 凭据")
+	}
+	seen := map[string]bool{}
+	for index := range credentials {
+		credentials[index].ID = strings.TrimSpace(credentials[index].ID)
+		credentials[index].Secret = strings.TrimSpace(credentials[index].Secret)
+		if credentials[index].ID == "" || credentials[index].Secret == "" {
+			return nil, errors.New("BeeAPI 返回的设备凭据不完整")
+		}
+		if seen[credentials[index].ID] {
+			return nil, errors.New("BeeAPI 返回了重复的设备凭据")
+		}
+		seen[credentials[index].ID] = true
+		models, err := r.modelsForCredential(endpoint, credentials[index].Secret)
+		if err != nil {
+			return nil, fmt.Errorf("配置 %q: %w", credentials[index].Name, err)
+		}
+		credentials[index].Models = models
+		fmt.Fprintf(r.out, "    %s · 可用模型 %d 个\n", credentials[index].Name, len(models))
+	}
+	return credentials, nil
+}
+
+func (r *runner) selectCredentialAssignments(agents []string, credentials []credentialMaterial, existing map[string]string, assumeYes bool) (map[string]string, error) {
+	if len(credentials) == 0 {
+		return nil, errors.New("没有可分配的 BeeAPI 配置")
+	}
+	assignments := map[string]string{}
+	if len(credentials) > 1 {
+		fmt.Fprintln(r.out, "\n  为每个工具选择 BeeAPI 密钥配置")
+		for index, credential := range credentials {
+			fmt.Fprintf(r.out, "    %d. %s · %s · %d 个模型\n", index+1, credential.Name, credential.Prefix, len(credential.Models))
+		}
+	}
+	for _, agent := range agents {
+		if peer := sharedClaudePeer(agent); peer != "" && assignments[peer] != "" {
+			assignments[agent] = assignments[peer]
+			fmt.Fprintf(r.out, "    %s 与 %s 共享本地配置，使用同一密钥配置\n", agentLabel(agent), agentLabel(peer))
+			continue
+		}
+		defaultIndex := 0
+		if id := strings.TrimSpace(existing[agent]); id != "" {
+			if index := credentialIndex(credentials, id); index >= 0 {
+				defaultIndex = index
+			}
+		}
+		if len(credentials) == 1 || assumeYes {
+			assignments[agent] = credentials[defaultIndex].ID
+			continue
+		}
+		answer, err := r.ask(fmt.Sprintf("  %s 使用哪个配置？[%d]: ", agentLabel(agent), defaultIndex+1))
+		if err != nil && !errors.Is(err, io.EOF) {
+			return nil, err
+		}
+		index := defaultIndex
+		if strings.TrimSpace(answer) != "" {
+			number, convErr := strconv.Atoi(strings.TrimSpace(answer))
+			if convErr != nil || number < 1 || number > len(credentials) {
+				return nil, fmt.Errorf("%s 的配置编号无效", agentLabel(agent))
+			}
+			index = number - 1
+		}
+		assignments[agent] = credentials[index].ID
+	}
+	return assignments, nil
+}
+
+func sharedClaudePeer(agent string) string {
+	switch agent {
+	case "claude":
+		return "claude-desktop"
+	case "claude-desktop":
+		return "claude"
+	default:
+		return ""
+	}
+}
+
+func credentialIndex(credentials []credentialMaterial, id string) int {
+	for index, credential := range credentials {
+		if credential.ID == id {
+			return index
+		}
+	}
+	return -1
+}
+
+func credentialForID(credentials []credentialMaterial, id string) (credentialMaterial, bool) {
+	if index := credentialIndex(credentials, id); index >= 0 {
+		return credentials[index], true
+	}
+	return credentialMaterial{}, false
+}
+
+func (r *runner) selectModelsForAssignments(agents []string, credentials []credentialMaterial, assignments map[string]string, assumeYes bool) (map[string]string, error) {
 	selected := map[string]string{}
+	fmt.Fprintln(r.out, "\n  根据所选密钥配置匹配模型")
 	for _, agent := range agents {
-		selected[agent] = recommendedModel(agent, models)
-	}
-	fmt.Fprintln(r.out, "\n[4/4] 匹配模型并写入配置")
-	for _, agent := range agents {
-		fmt.Fprintf(r.out, "  %-10s %s\n", agent, selected[agent])
+		if peer := sharedClaudePeer(agent); peer != "" && selected[peer] != "" {
+			selected[agent] = selected[peer]
+			continue
+		}
+		credential, ok := credentialForID(credentials, assignments[agent])
+		if !ok || len(credential.Models) == 0 {
+			return nil, fmt.Errorf("%s 没有可用的密钥配置或模型", agentLabel(agent))
+		}
+		selected[agent] = recommendedModel(agent, credential.Models)
+		fmt.Fprintf(r.out, "  %-16s %-24s %s\n", agentLabel(agent), credential.Name, selected[agent])
 	}
 	if assumeYes {
 		return selected, nil
 	}
 	answer, err := r.ask("  使用以上推荐模型？[Y/n]: ")
-	if err != nil {
+	if err != nil && !errors.Is(err, io.EOF) {
 		return nil, err
 	}
-	if strings.EqualFold(strings.TrimSpace(answer), "n") {
-		fmt.Fprintf(r.out, "  可用模型示例: %s\n", strings.Join(models[:min(len(models), 12)], ", "))
-		for _, agent := range agents {
-			value, readErr := r.ask(fmt.Sprintf("  %s 模型 [%s]: ", agent, selected[agent]))
-			if readErr != nil {
-				return nil, readErr
-			}
-			if strings.TrimSpace(value) != "" {
-				selected[agent] = strings.TrimSpace(value)
-			}
+	if !strings.EqualFold(strings.TrimSpace(answer), "n") {
+		return selected, nil
+	}
+	customized := map[string]bool{}
+	for _, agent := range agents {
+		if peer := sharedClaudePeer(agent); peer != "" && customized[peer] {
+			selected[agent] = selected[peer]
+			customized[agent] = true
+			continue
 		}
+		credential, _ := credentialForID(credentials, assignments[agent])
+		fmt.Fprintf(r.out, "  %s 可用模型: %s\n", agentLabel(agent), strings.Join(credential.Models[:min(len(credential.Models), 12)], ", "))
+		value, readErr := r.ask(fmt.Sprintf("  %s 模型 [%s]: ", agentLabel(agent), selected[agent]))
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return nil, readErr
+		}
+		value = strings.TrimSpace(value)
+		if value == "" {
+			customized[agent] = true
+			continue
+		}
+		if !containsExact(credential.Models, value) {
+			return nil, fmt.Errorf("模型 %q 不在 %s 的可用列表中", value, credential.Name)
+		}
+		selected[agent] = value
+		customized[agent] = true
 	}
 	return selected, nil
+}
+
+func containsExact(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *runner) saveCredentialMaterials(credentials []credentialMaterial) ([]state.Credential, error) {
+	stored := make([]state.Credential, 0, len(credentials))
+	for _, credential := range credentials {
+		backend, err := r.store.SaveNamedCredential(credential.ID, credential.Secret)
+		if err != nil {
+			return nil, fmt.Errorf("保存配置 %q: %w", credential.Name, err)
+		}
+		stored = append(stored, state.Credential{
+			ID: credential.ID, Name: credential.Name, Prefix: credential.Prefix,
+			SourcePrefix: credential.SourcePrefix, Backend: backend,
+		})
+	}
+	return stored, nil
+}
+
+func (r *runner) loadCredentialMaterials(cfg state.Config, withModels bool) ([]credentialMaterial, error) {
+	var credentials []credentialMaterial
+	if len(cfg.Credentials) == 0 {
+		secret, err := r.store.LoadCredential(cfg.CredentialBackend)
+		if err != nil {
+			return nil, err
+		}
+		name := strings.TrimSpace(cfg.KeyName)
+		if name == "" {
+			name = "旧版默认配置"
+		}
+		credentials = []credentialMaterial{{ID: "default", Name: name, Prefix: safeKeyPrefix(secret), Secret: secret}}
+	} else {
+		credentials = make([]credentialMaterial, 0, len(cfg.Credentials))
+		seen := map[string]bool{}
+		for _, stored := range cfg.Credentials {
+			if strings.TrimSpace(stored.ID) == "" || strings.TrimSpace(stored.Backend) == "" || seen[stored.ID] {
+				return nil, errors.New("本地 BeeAPI 凭据索引损坏，请重新登录")
+			}
+			seen[stored.ID] = true
+			secret, err := r.store.LoadNamedCredential(stored.Backend, stored.ID)
+			if err != nil {
+				return nil, fmt.Errorf("读取配置 %q: %w", stored.Name, err)
+			}
+			credentials = append(credentials, credentialMaterial{
+				ID: stored.ID, Name: stored.Name, Prefix: stored.Prefix,
+				SourcePrefix: stored.SourcePrefix, Secret: secret,
+			})
+		}
+	}
+	if withModels {
+		return r.discoverCredentialModels(cfg.Endpoint, credentials)
+	}
+	return credentials, nil
+}
+
+func apiKeysForAssignments(agents []string, credentials []credentialMaterial, assignments map[string]string) (map[string]string, error) {
+	keys := map[string]string{}
+	for _, agent := range agents {
+		credential, ok := credentialForID(credentials, assignments[agent])
+		if !ok || strings.TrimSpace(credential.Secret) == "" {
+			return nil, fmt.Errorf("%s 没有对应的本地凭据", agentLabel(agent))
+		}
+		keys[agent] = credential.Secret
+	}
+	return keys, nil
+}
+
+func credentialSummaryName(credentials []state.Credential) string {
+	if len(credentials) == 0 {
+		return ""
+	}
+	if len(credentials) == 1 {
+		return credentials[0].Name
+	}
+	return fmt.Sprintf("%d 个密钥配置", len(credentials))
 }
 
 func recommendedModel(agent string, models []string) string {
@@ -623,6 +894,7 @@ func recommendedModel(agent string, models []string) string {
 }
 
 func (r *runner) detect() error {
+	fmt.Fprintln(r.out, "\n检查本机 AI 工具环境")
 	environments, err := detectEnvironments()
 	if err != nil {
 		return err
@@ -668,17 +940,25 @@ func (r *runner) configure(args []string) error {
 			models[agent] = cfg.DefaultModel
 		}
 	}
-	key, err := r.store.LoadCredential(cfg.CredentialBackend)
+	credentials, err := r.loadCredentialMaterials(cfg, false)
+	if err != nil {
+		return err
+	}
+	assignments, err := r.selectCredentialAssignments(agents, credentials, cfg.AgentCredentials, true)
+	if err != nil {
+		return err
+	}
+	apiKeys, err := apiKeysForAssignments(agents, credentials, assignments)
 	if err != nil {
 		return err
 	}
 	result, err := configurator.Apply(r.store, configurator.Options{
-		Endpoint: cfg.Endpoint, APIKey: key, Models: models, Agents: agents, BinaryPath: cfg.BinaryPath,
+		Endpoint: cfg.Endpoint, APIKeys: apiKeys, Models: models, Agents: agents, BinaryPath: cfg.BinaryPath,
 	})
 	if err != nil {
 		return err
 	}
-	cfg.Agents, cfg.Models = agents, models
+	cfg.Agents, cfg.Models, cfg.AgentCredentials = agents, models, assignments
 	if err := r.store.SaveConfig(cfg); err != nil {
 		return err
 	}
@@ -782,25 +1062,17 @@ func (r *runner) optimizeAndMaybeApply(host string, forceApply, assumeYes bool) 
 	if err != nil {
 		return result, fmt.Errorf("备份 Hosts: %w", err)
 	}
-	validated := []string{}
-	for _, candidate := range []string{"beeapi.ai", "beeapi.dev"} {
-		validateCtx, cancel := context.WithTimeout(r.ctx, 10*time.Second)
-		validateErr := routeopt.ValidatePinnedIP(validateCtx, candidate, result.IP)
-		cancel()
-		if validateErr == nil {
-			validated = append(validated, candidate)
-		}
+	validateCtx, validateCancel := context.WithTimeout(r.ctx, 10*time.Second)
+	validateErr := routeopt.ValidatePinnedIP(validateCtx, host, result.IP)
+	validateCancel()
+	if validateErr != nil {
+		return result, fmt.Errorf("优选 IP 没有通过 %s 的 TLS 与健康检查: %w", host, validateErr)
 	}
-	if len(validated) == 0 {
-		return result, errors.New("优选 IP 没有通过任一 BeeAPI 域名的 TLS 与业务接口校验")
+	if err := routeopt.ApplyHosts(path, host, result.IP); err != nil {
+		_, _ = r.store.Rollback(backup.ID)
+		return result, err
 	}
-	for _, candidate := range validated {
-		if err := routeopt.ApplyHosts(path, candidate, result.IP); err != nil {
-			_, _ = r.store.Rollback(backup.ID)
-			return result, err
-		}
-	}
-	fmt.Fprintf(r.out, "  已为 %s 写入受管 Hosts；备份编号 %s\n", strings.Join(validated, "、"), backup.ID)
+	fmt.Fprintf(r.out, "  已为 %s 写入受管 Hosts；备份编号 %s\n", host, backup.ID)
 	return result, nil
 }
 
@@ -818,18 +1090,42 @@ func (r *runner) rollback(args []string) error {
 }
 
 func (r *runner) token(args []string) error {
-	if len(args) != 1 || args[0] != "print" {
-		return errors.New("用法: beeapi token print")
+	if len(args) == 0 || args[0] != "print" {
+		return errors.New("用法: beeapi token print [--agent 工具 | --credential 凭据ID]")
+	}
+	flags := flag.NewFlagSet("token print", flag.ContinueOnError)
+	flags.SetOutput(r.errOut)
+	var agent, credentialID string
+	flags.StringVar(&agent, "agent", "", "读取分配给此工具的凭据")
+	flags.StringVar(&credentialID, "credential", "", "读取指定凭据")
+	if err := flags.Parse(args[1:]); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || (agent != "" && credentialID != "") {
+		return errors.New("用法: beeapi token print [--agent 工具 | --credential 凭据ID]")
 	}
 	cfg, err := r.store.LoadConfig()
 	if err != nil {
 		return err
 	}
-	secret, err := r.store.LoadCredential(cfg.CredentialBackend)
+	credentials, err := r.loadCredentialMaterials(cfg, false)
 	if err != nil {
 		return err
 	}
-	_, err = fmt.Fprintln(r.out, secret)
+	if credentialID == "" && agent != "" {
+		credentialID = cfg.AgentCredentials[strings.ToLower(strings.TrimSpace(agent))]
+	}
+	if credentialID == "" {
+		if len(credentials) != 1 {
+			return errors.New("本地有多个 BeeAPI 凭据，请使用 --agent 或 --credential 指定")
+		}
+		credentialID = credentials[0].ID
+	}
+	credential, ok := credentialForID(credentials, credentialID)
+	if !ok {
+		return errors.New("没有找到目标工具对应的 BeeAPI 凭据，请重新配置该工具")
+	}
+	_, err = fmt.Fprintln(r.out, credential.Secret)
 	return err
 }
 
@@ -863,9 +1159,17 @@ func (r *runner) runAgent(args []string) error {
 	if err != nil {
 		return err
 	}
-	secret, err := r.store.LoadCredential(cfg.CredentialBackend)
+	credentials, err := r.loadCredentialMaterials(cfg, false)
 	if err != nil {
 		return err
+	}
+	credentialID := cfg.AgentCredentials[agent]
+	if credentialID == "" && len(credentials) == 1 {
+		credentialID = credentials[0].ID
+	}
+	credential, ok := credentialForID(credentials, credentialID)
+	if !ok {
+		return fmt.Errorf("%s 尚未分配 BeeAPI 密钥配置，请先运行 beeapi configure", agentLabel(agent))
 	}
 	commandArgs := append([]string(nil), args[1:]...)
 	if agent == "codex" {
@@ -873,7 +1177,7 @@ func (r *runner) runAgent(args []string) error {
 	}
 	cmd := exec.CommandContext(r.ctx, path, commandArgs...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = r.in, r.out, r.errOut
-	cmd.Env = append(os.Environ(), agentEnvironment(agent, cfg, secret)...)
+	cmd.Env = append(os.Environ(), agentEnvironment(agent, cfg, credential.Secret)...)
 	return cmd.Run()
 }
 

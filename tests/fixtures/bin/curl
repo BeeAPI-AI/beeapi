@@ -1,0 +1,39 @@
+#!/bin/sh
+set -eu
+
+url=""
+destination=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --output)
+      [ "$#" -ge 2 ] || exit 2
+      destination="$2"
+      shift 2
+      ;;
+    https://*)
+      url="$1"
+      shift
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+
+[ -n "${BEEAPI_TEST_ASSET_DIR:-}" ] || exit 2
+[ -n "$url" ] || exit 2
+[ -n "$destination" ] || exit 2
+case "$url" in
+  https://getbeeapi.com/*)
+    [ "${BEEAPI_TEST_FAIL_MIRROR:-0}" != "1" ] || exit 22
+    if [ "${BEEAPI_TEST_CORRUPT_MIRROR:-0}" = "1" ]; then
+      case "$url" in
+        *.sha256)
+          printf '%064d\n' 0 > "$destination"
+          exit 0
+          ;;
+      esac
+    fi
+    ;;
+esac
+cp "$BEEAPI_TEST_ASSET_DIR/${url##*/}" "$destination"

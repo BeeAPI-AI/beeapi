@@ -10,6 +10,92 @@ usage() {
   printf '%s\n' "Usage: install.sh [--version vX.Y.Z] [--install-dir PATH] [--no-setup]"
 }
 
+configure_shell_path() {
+  case ":$PATH:" in
+    *":$install_dir:"*)
+      printf '%s\n' "The beeapi command is already available in PATH."
+      return 0
+      ;;
+  esac
+
+  shell_name="${SHELL:-}"
+  shell_name="${shell_name##*/}"
+  profile=""
+  path_line=""
+  case "$shell_name" in
+    zsh)
+      profile="$HOME/.zshrc"
+      ;;
+    bash)
+      if [ "$os" = "darwin" ]; then
+        profile="$HOME/.bash_profile"
+      else
+        profile="$HOME/.bashrc"
+      fi
+      ;;
+    sh|dash|ash|ksh)
+      profile="$HOME/.profile"
+      ;;
+    fish)
+      profile="$HOME/.config/fish/conf.d/getbeeapi.fish"
+      mkdir -p "$(dirname "$profile")"
+      if [ "$install_dir" = "$HOME/.local/bin" ]; then
+        path_line='fish_add_path -g $HOME/.local/bin'
+      else
+        case "$install_dir" in
+          *:*)
+            printf '%s\n' "Install directory contains ':'; PATH was not edited automatically." >&2
+            profile=""
+            ;;
+          *)
+            escaped_dir="$(printf '%s' "$install_dir" | sed "s/'/'\\\\''/g")"
+            path_line="fish_add_path -g '$escaped_dir'"
+            ;;
+        esac
+      fi
+      ;;
+    *)
+      profile="$HOME/.profile"
+      ;;
+  esac
+
+  if [ -n "$profile" ] && [ -z "$path_line" ]; then
+    if [ "$install_dir" = "$HOME/.local/bin" ]; then
+      path_line='export PATH="$HOME/.local/bin:$PATH"'
+    else
+      case "$install_dir" in
+        *:*)
+          printf '%s\n' "Install directory contains ':'; PATH was not edited automatically." >&2
+          profile=""
+          ;;
+        *)
+          escaped_dir="$(printf '%s' "$install_dir" | sed "s/'/'\\\\''/g")"
+          path_line="export PATH='$escaped_dir':\"\$PATH\""
+          ;;
+      esac
+    fi
+  fi
+
+  if [ -n "$profile" ] && [ -n "$path_line" ]; then
+    if [ ! -f "$profile" ] || ! grep -Fq '# >>> getbeeapi PATH >>>' "$profile"; then
+      {
+        printf '\n%s\n' '# >>> getbeeapi PATH >>>'
+        printf '%s\n' "$path_line"
+        printf '%s\n' '# <<< getbeeapi PATH <<<'
+      } >> "$profile"
+    fi
+    printf 'Added the beeapi command to %s\n' "$profile"
+    if [ "$shell_name" = "fish" ]; then
+      printf 'Open a new terminal or run:  source %s\n' "$profile"
+    else
+      printf 'Open a new terminal or run:  . %s\n' "$profile"
+    fi
+    return 0
+  fi
+
+  printf 'Add this directory to PATH for future shells:\n  export PATH="%s:$PATH"\n' "$install_dir"
+}
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --version)
@@ -52,17 +138,19 @@ esac
 
 asset="beeapi_${os}_${arch}.tar.gz"
 if [ -n "${BEEAPI_DOWNLOAD_BASE:-}" ]; then
-  base="${BEEAPI_DOWNLOAD_BASE%/}"
+  bases="${BEEAPI_DOWNLOAD_BASE%/}"
 elif [ "$version" = "latest" ]; then
-  base="https://github.com/BeeAPI-AI/beeapi/releases/latest/download"
+  bases="https://getbeeapi.com/releases/latest/download https://github.com/BeeAPI-AI/beeapi/releases/latest/download"
 else
-  base="https://github.com/BeeAPI-AI/beeapi/releases/download/$version"
+  bases="https://getbeeapi.com/releases/$version/download https://github.com/BeeAPI-AI/beeapi/releases/download/$version"
 fi
 
-case "$base" in
-  https://*) ;;
-  *) printf '%s\n' "Download base must use HTTPS" >&2; exit 1 ;;
-esac
+for candidate_base in $bases; do
+  case "$candidate_base" in
+    https://*) ;;
+    *) printf '%s\n' "Download base must use HTTPS" >&2; exit 1 ;;
+  esac
+done
 
 tmp_dir="$(mktemp -d 2>/dev/null || mktemp -d -t getbeeapi)"
 trap 'rm -rf "$tmp_dir"' EXIT HUP INT TERM
@@ -77,29 +165,53 @@ download() {
       wget --https-only --quiet "$url" --output-document "$destination"
     else
       printf '%s\n' "This wget cannot enforce HTTPS-only redirects; install curl or GNU Wget" >&2
-      exit 1
+      return 1
     fi
   else
     printf '%s\n' "curl or wget is required" >&2
-    exit 1
+    return 1
   fi
 }
 
-printf 'Downloading %s…\n' "$asset"
-download "$base/$asset" "$tmp_dir/$asset"
-download "$base/$asset.sha256" "$tmp_dir/$asset.sha256"
-expected="$(tr -d '[:space:]' < "$tmp_dir/$asset.sha256")"
+sha256_file() {
+  target="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$target" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$target" | awk '{print $1}'
+  else
+    openssl dgst -sha256 "$target" | awk '{print $NF}'
+  fi
+}
 
-if command -v sha256sum >/dev/null 2>&1; then
-  actual="$(sha256sum "$tmp_dir/$asset" | awk '{print $1}')"
-elif command -v shasum >/dev/null 2>&1; then
-  actual="$(shasum -a 256 "$tmp_dir/$asset" | awk '{print $1}')"
-else
-  actual="$(openssl dgst -sha256 "$tmp_dir/$asset" | awk '{print $NF}')"
-fi
-
-if [ "$expected" != "$actual" ]; then
-  printf '%s\n' "SHA-256 verification failed" >&2
+downloaded=0
+for candidate_base in $bases; do
+  printf 'Downloading %s from %s…\n' "$asset" "$candidate_base"
+  if download "$candidate_base/$asset" "$tmp_dir/$asset" && \
+     download "$candidate_base/$asset.sha256" "$tmp_dir/$asset.sha256"; then
+    expected="$(tr -d '[:space:]' < "$tmp_dir/$asset.sha256")"
+    actual="$(sha256_file "$tmp_dir/$asset")"
+    case "$expected" in
+      ''|*[!0-9a-fA-F]*) checksum_valid=0 ;;
+      *)
+        if [ "${#expected}" -eq 64 ] && [ "$expected" = "$actual" ]; then
+          checksum_valid=1
+        else
+          checksum_valid=0
+        fi
+        ;;
+    esac
+    if [ "$checksum_valid" -eq 1 ]; then
+      downloaded=1
+      break
+    fi
+    printf '%s\n' "SHA-256 verification failed for this source; trying the next source." >&2
+    continue
+  fi
+  printf '%s\n' "This source is unavailable; trying the next verified source." >&2
+done
+if [ "$downloaded" -ne 1 ]; then
+  printf '%s\n' "Unable to download the BeeAPI release from any source." >&2
   exit 1
 fi
 
@@ -113,17 +225,12 @@ else
 fi
 
 printf '\nInstalled beeapi to %s\n' "$install_dir/beeapi"
-case ":$PATH:" in
-  *":$install_dir:"*) ;;
-  *)
-    printf 'Add this directory to PATH:\n  export PATH="%s:$PATH"\n' "$install_dir"
-    ;;
-esac
+configure_shell_path
 
 if [ "$run_setup" -eq 1 ]; then
   if [ -r /dev/tty ] && ( : </dev/tty ) 2>/dev/null; then
-    exec "$install_dir/beeapi" </dev/tty
+    "$install_dir/beeapi" </dev/tty
   else
-    printf '\nRun %s/beeapi to start the setup guide.\n' "$install_dir"
+    printf '\nRun beeapi in a new terminal to start the setup guide.\n'
   fi
 fi

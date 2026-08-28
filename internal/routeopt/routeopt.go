@@ -29,7 +29,10 @@ import (
 	"github.com/BeeAPI-AI/beeapi/internal/state"
 )
 
-const releaseAPI = "https://api.github.com/repos/XIU2/CloudflareSpeedTest/releases/latest"
+var releaseAPIs = []string{
+	"https://getbeeapi.com/releases/cfst/latest.json",
+	"https://api.github.com/repos/XIU2/CloudflareSpeedTest/releases/latest",
+}
 
 type release struct {
 	TagName string `json:"tag_name"`
@@ -55,7 +58,7 @@ func EnsureCFST(ctx context.Context, output io.Writer) (string, string, error) {
 			return binaryPath, strings.TrimSpace(string(b)), nil
 		}
 	}
-	fmt.Fprintln(output, "正在从 XIU2/CloudflareSpeedTest 官方发行页获取测速组件…")
+	fmt.Fprintln(output, "正在获取 XIU2/CloudflareSpeedTest 官方测速组件…")
 	client := &http.Client{
 		Timeout: 30 * time.Second,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -65,23 +68,16 @@ func EnsureCFST(ctx context.Context, output io.Writer) (string, string, error) {
 			return nil
 		},
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, releaseAPI, nil)
-	if err != nil {
-		return "", "", err
-	}
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("User-Agent", "beeapi-cli/1")
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", "", fmt.Errorf("GitHub 发行接口返回 HTTP %d", resp.StatusCode)
-	}
 	var rel release
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&rel); err != nil {
-		return "", "", err
+	var releaseErr error
+	for _, endpoint := range releaseAPIs {
+		rel, releaseErr = fetchRelease(ctx, client, endpoint)
+		if releaseErr == nil {
+			break
+		}
+	}
+	if releaseErr != nil {
+		return "", "", fmt.Errorf("读取 CloudflareSpeedTest 官方发行信息: %w", releaseErr)
 	}
 	assetName, err := platformAssetName()
 	if err != nil {
@@ -97,9 +93,16 @@ func EnsureCFST(ctx context.Context, output io.Writer) (string, string, error) {
 	if downloadURL == "" || !strings.HasPrefix(digest, "sha256:") {
 		return "", "", fmt.Errorf("发行版 %s 缺少 %s 或 SHA-256 摘要", rel.TagName, assetName)
 	}
-	archivePath, err := downloadVerified(ctx, client, downloadURL, strings.TrimPrefix(digest, "sha256:"))
-	if err != nil {
-		return "", "", err
+	var archivePath string
+	var downloadErr error
+	for _, source := range cfstDownloadSources(rel.TagName, assetName, downloadURL) {
+		archivePath, downloadErr = downloadVerified(ctx, client, source, strings.TrimPrefix(digest, "sha256:"))
+		if downloadErr == nil {
+			break
+		}
+	}
+	if downloadErr != nil {
+		return "", "", downloadErr
 	}
 	defer os.Remove(archivePath)
 	dest := filepath.Join(cache, "cfst")
@@ -121,6 +124,56 @@ func EnsureCFST(ctx context.Context, output io.Writer) (string, string, error) {
 		return "", "", err
 	}
 	return binaryPath, rel.TagName, nil
+}
+
+func fetchRelease(ctx context.Context, client *http.Client, endpoint string) (release, error) {
+	var rel release
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return rel, err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", "beeapi-cli/1")
+	resp, err := client.Do(req)
+	if err != nil {
+		return rel, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return rel, fmt.Errorf("%s 返回 HTTP %d", req.URL.Hostname(), resp.StatusCode)
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&rel); err != nil {
+		return rel, err
+	}
+	if strings.TrimSpace(rel.TagName) == "" {
+		return rel, errors.New("发行信息缺少版本号")
+	}
+	return rel, nil
+}
+
+func cfstDownloadSources(tag, asset, githubURL string) []string {
+	var sources []string
+	if validReleaseTag(tag) && strings.HasPrefix(asset, "cfst_") && !strings.ContainsAny(asset, `/\\`) {
+		sources = append(sources, "https://getbeeapi.com/releases/cfst/"+tag+"/"+asset)
+	}
+	if strings.TrimSpace(githubURL) != "" {
+		sources = append(sources, githubURL)
+	}
+	return sources
+}
+
+func validReleaseTag(tag string) bool {
+	if len(tag) < 2 || len(tag) > 65 || tag[0] != 'v' {
+		return false
+	}
+	for _, char := range tag[1:] {
+		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') ||
+			(char >= '0' && char <= '9') || char == '.' || char == '_' || char == '-' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func platformAssetName() (string, error) {
@@ -160,8 +213,8 @@ func cacheDir() (string, error) {
 
 func downloadVerified(ctx context.Context, client *http.Client, rawURL, expected string) (string, error) {
 	u, err := url.Parse(rawURL)
-	if err != nil || u.Scheme != "https" || (u.Hostname() != "github.com" && u.Hostname() != "objects.githubusercontent.com") {
-		return "", errors.New("测速组件下载地址不是受信任的 GitHub HTTPS 地址")
+	if err != nil || u.Scheme != "https" || !trustedDownloadHost(u.Hostname()) {
+		return "", errors.New("测速组件下载地址不是受信任的 HTTPS 来源")
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
@@ -202,7 +255,7 @@ func downloadVerified(ctx context.Context, client *http.Client, rawURL, expected
 
 func trustedDownloadHost(host string) bool {
 	switch strings.ToLower(host) {
-	case "github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com":
+	case "getbeeapi.com", "api.github.com", "github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com":
 		return true
 	default:
 		return false
@@ -355,7 +408,7 @@ func cfstArgs(ipFile, csvPath, host string) []string {
 		"-t", "4",
 		"-tp", "443",
 		"-tlr", "0.2",
-		"-url", "https://" + host + "/api/v1/public/api-endpoints",
+		"-url", "https://" + host + "/healthz",
 		"-httping",
 		"-httping-code", "200",
 		"-dd",
@@ -409,7 +462,7 @@ func ValidatePinnedIP(ctx context.Context, host, ip string) error {
 	}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, Timeout: 8 * time.Second}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+host+"/api/v1/public/api-endpoints", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+host+"/healthz", nil)
 	if err != nil {
 		return err
 	}
@@ -418,9 +471,15 @@ func ValidatePinnedIP(ctx context.Context, host, ip string) error {
 		return err
 	}
 	defer resp.Body.Close()
-	io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
-	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
+	if resp.StatusCode != http.StatusOK {
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 		return fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	var health struct {
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&health); err != nil || !strings.EqualFold(strings.TrimSpace(health.Status), "ok") {
+		return errors.New("healthz 响应无效")
 	}
 	return nil
 }

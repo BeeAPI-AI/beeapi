@@ -2,6 +2,7 @@ package state
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,15 +18,44 @@ import (
 
 const keyringService = "com.getbeeapi.cli"
 
+const CurrentSchemaVersion = 2
+
+type Credential struct {
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Prefix       string `json:"prefix,omitempty"`
+	SourcePrefix string `json:"source_prefix,omitempty"`
+	Backend      string `json:"backend"`
+}
+
 type Config struct {
+	SchemaVersion     int               `json:"schema_version,omitempty"`
 	Endpoint          string            `json:"endpoint"`
 	KeyName           string            `json:"key_name,omitempty"`
 	DefaultModel      string            `json:"default_model,omitempty"`
 	Models            map[string]string `json:"models,omitempty"`
 	Agents            []string          `json:"agents,omitempty"`
+	Credentials       []Credential      `json:"credentials,omitempty"`
+	AgentCredentials  map[string]string `json:"agent_credentials,omitempty"`
 	BinaryPath        string            `json:"binary_path,omitempty"`
 	CredentialBackend string            `json:"credential_backend,omitempty"`
+	InitializedAt     time.Time         `json:"initialized_at,omitempty"`
 	UpdatedAt         time.Time         `json:"updated_at"`
+}
+
+// Initialized deliberately accepts pre-schema config files produced by
+// GetBeeAPI v0.1.0. Endpoint + credential backend were only written after the
+// old setup completed, so they are a safe migration signal for returning users.
+func (c Config) Initialized() bool {
+	if strings.TrimSpace(c.Endpoint) == "" {
+		return false
+	}
+	for _, credential := range c.Credentials {
+		if strings.TrimSpace(credential.ID) != "" && strings.TrimSpace(credential.Backend) != "" {
+			return true
+		}
+	}
+	return strings.TrimSpace(c.CredentialBackend) != ""
 }
 
 type Store struct {
@@ -65,6 +95,12 @@ func (s *Store) LoadConfig() (Config, error) {
 }
 
 func (s *Store) SaveConfig(cfg Config) error {
+	if cfg.SchemaVersion < CurrentSchemaVersion {
+		cfg.SchemaVersion = CurrentSchemaVersion
+	}
+	if cfg.Initialized() && cfg.InitializedAt.IsZero() {
+		cfg.InitializedAt = time.Now().UTC()
+	}
 	cfg.UpdatedAt = time.Now().UTC()
 	b, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
@@ -78,18 +114,30 @@ func (s *Store) SaveConfig(cfg Config) error {
 }
 
 func (s *Store) SaveCredential(secret string) (string, error) {
+	return s.SaveNamedCredential("default", secret)
+}
+
+// SaveNamedCredential stores one secret in an OS keyring when available, or
+// in a private per-credential file. The opaque credential ID is never used as
+// a path or keyring account directly.
+func (s *Store) SaveNamedCredential(id, secret string) (string, error) {
+	id = strings.TrimSpace(id)
 	secret = strings.TrimSpace(secret)
+	if id == "" {
+		return "", errors.New("凭据 ID 不能为空")
+	}
 	if secret == "" {
 		return "", errors.New("API Key 不能为空")
 	}
+	account := credentialAccount(id)
 	if os.Getenv("GETBEE_DISABLE_KEYRING") != "1" {
 		switch runtime.GOOS {
 		case "linux":
 			if path, err := exec.LookPath("secret-tool"); err == nil {
-				cmd := exec.Command(path, "store", "--label=GetBeeAPI CLI", "service", keyringService, "account", "default")
+				cmd := exec.Command(path, "store", "--label=GetBeeAPI CLI", "service", keyringService, "account", account)
 				cmd.Stdin = strings.NewReader(secret)
 				if out, err := cmd.CombinedOutput(); err == nil {
-					_ = os.Remove(s.credentialPath())
+					_ = os.Remove(s.credentialPath(id))
 					return "secret-service", nil
 				} else if len(out) > 0 {
 					_ = out // fall through to a protected file
@@ -97,33 +145,43 @@ func (s *Store) SaveCredential(secret string) (string, error) {
 			}
 		case "darwin":
 			if path, err := exec.LookPath("security"); err == nil {
-				cmd := exec.Command(path, "add-generic-password", "-a", "default", "-s", keyringService, "-w", secret, "-U")
+				cmd := exec.Command(path, "add-generic-password", "-a", account, "-s", keyringService, "-w", secret, "-U")
 				if err := cmd.Run(); err == nil {
-					_ = os.Remove(s.credentialPath())
+					_ = os.Remove(s.credentialPath(id))
 					return "keychain", nil
 				}
 			}
 		case "windows":
-			if err := s.saveWindowsDPAPI(secret); err == nil {
+			if err := s.saveWindowsDPAPI(id, secret); err == nil {
 				return "dpapi", nil
 			}
 		}
 	}
-	if err := AtomicWrite(s.credentialPath(), []byte(secret+"\n"), 0o600); err != nil {
+	path := s.credentialPath(id)
+	if err := AtomicWrite(path, []byte(secret+"\n"), 0o600); err != nil {
 		return "", fmt.Errorf("保存凭据: %w", err)
 	}
-	if err := os.Chmod(s.credentialPath(), 0o600); err != nil {
+	if err := os.Chmod(path, 0o600); err != nil {
 		return "", fmt.Errorf("保护凭据权限: %w", err)
 	}
 	return "protected-file", nil
 }
 
 func (s *Store) LoadCredential(backend string) (string, error) {
+	return s.LoadNamedCredential(backend, "default")
+}
+
+func (s *Store) LoadNamedCredential(backend, id string) (string, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return "", errors.New("凭据 ID 不能为空")
+	}
+	account := credentialAccount(id)
 	switch backend {
 	case "secret-service":
 		path, err := exec.LookPath("secret-tool")
 		if err == nil {
-			out, runErr := exec.Command(path, "lookup", "service", keyringService, "account", "default").Output()
+			out, runErr := exec.Command(path, "lookup", "service", keyringService, "account", account).Output()
 			if runErr == nil && strings.TrimSpace(string(out)) != "" {
 				return strings.TrimSpace(string(out)), nil
 			}
@@ -131,17 +189,17 @@ func (s *Store) LoadCredential(backend string) (string, error) {
 	case "keychain":
 		path, err := exec.LookPath("security")
 		if err == nil {
-			out, runErr := exec.Command(path, "find-generic-password", "-a", "default", "-s", keyringService, "-w").Output()
+			out, runErr := exec.Command(path, "find-generic-password", "-a", account, "-s", keyringService, "-w").Output()
 			if runErr == nil && strings.TrimSpace(string(out)) != "" {
 				return strings.TrimSpace(string(out)), nil
 			}
 		}
 	case "dpapi":
-		if secret, err := s.loadWindowsDPAPI(); err == nil && secret != "" {
+		if secret, err := s.loadWindowsDPAPI(id); err == nil && secret != "" {
 			return secret, nil
 		}
 	}
-	b, err := os.ReadFile(s.credentialPath())
+	b, err := os.ReadFile(s.credentialPath(id))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return "", errors.New("尚未登录，请先运行 beeapi setup")
@@ -155,9 +213,22 @@ func (s *Store) LoadCredential(backend string) (string, error) {
 	return secret, nil
 }
 
-func (s *Store) credentialPath() string { return filepath.Join(s.Dir, "credential") }
+func credentialAccount(id string) string {
+	if id == "default" {
+		return "default"
+	}
+	digest := sha256.Sum256([]byte(id))
+	return fmt.Sprintf("credential-%x", digest[:16])
+}
 
-func (s *Store) saveWindowsDPAPI(secret string) error {
+func (s *Store) credentialPath(id string) string {
+	if id == "default" {
+		return filepath.Join(s.Dir, "credential")
+	}
+	return filepath.Join(s.Dir, "credentials", credentialAccount(id)+".key")
+}
+
+func (s *Store) saveWindowsDPAPI(id, secret string) error {
 	if runtime.GOOS != "windows" {
 		return errors.New("not windows")
 	}
@@ -165,14 +236,17 @@ func (s *Store) saveWindowsDPAPI(secret string) error {
 	if err != nil {
 		return err
 	}
-	dest := filepath.Join(s.Dir, "credential.dpapi")
+	dest := strings.TrimSuffix(s.credentialPath(id), ".key") + ".dpapi"
+	if err := os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {
+		return err
+	}
 	script := `$p=[Console]::In.ReadToEnd(); $s=ConvertTo-SecureString $p -AsPlainText -Force; ConvertFrom-SecureString $s | Set-Content -NoNewline -LiteralPath $args[0]`
 	cmd := exec.Command(path, "-NoProfile", "-NonInteractive", "-Command", script, dest)
 	cmd.Stdin = strings.NewReader(secret)
 	return cmd.Run()
 }
 
-func (s *Store) loadWindowsDPAPI() (string, error) {
+func (s *Store) loadWindowsDPAPI(id string) (string, error) {
 	if runtime.GOOS != "windows" {
 		return "", errors.New("not windows")
 	}
@@ -180,7 +254,7 @@ func (s *Store) loadWindowsDPAPI() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	source := filepath.Join(s.Dir, "credential.dpapi")
+	source := strings.TrimSuffix(s.credentialPath(id), ".key") + ".dpapi"
 	script := `$s=Get-Content -Raw -LiteralPath $args[0] | ConvertTo-SecureString; $b=[Runtime.InteropServices.Marshal]::SecureStringToBSTR($s); try {[Runtime.InteropServices.Marshal]::PtrToStringBSTR($b)} finally {[Runtime.InteropServices.Marshal]::ZeroFreeBSTR($b)}`
 	out, err := exec.Command(path, "-NoProfile", "-NonInteractive", "-Command", script, source).Output()
 	return strings.TrimSpace(string(out)), err

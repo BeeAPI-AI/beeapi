@@ -16,8 +16,11 @@ test("exports the GetBeeAPI product page for static hosting", async () => {
   assert.match(html, /BeeAPI 访问入口/);
   assert.match(html, /https:\/\/beeapi\.ai/);
   assert.match(html, /https:\/\/beeapi\.dev/);
-  assert.match(html, /网页登录并选择 Key/);
+  assert.match(html, /网页登录并批准设备/);
   assert.match(html, /直接粘贴 API Key/);
+  assert.match(html, /设备专用 Key/);
+  assert.match(html, /选择 1–10 个/);
+  assert.doesNotMatch(html, /回到 CLI 选择一枚已有 Key/);
   for (const tool of [
     "Claude Code",
     "Claude Desktop",
@@ -33,7 +36,7 @@ test("exports the GetBeeAPI product page for static hosting", async () => {
   assert.match(html, /当前版本 · 8 项适配/);
   assert.match(html, /普通 Claude 聊天仍使用 Anthropic 账户模型/);
 
-  const ordered = ["线路优选", "登录并选择 Key", "发现本地工具", "完成配置"];
+  const ordered = ["选择可用入口", "连接 BeeAPI", "配置本地工具"];
   let previous = -1;
   for (const text of ordered) {
     const index = html.indexOf(text, previous + 1);
@@ -50,11 +53,14 @@ test("ships matching verified installers", async () => {
   ]);
 
   assert.match(shell, /SHA-256 verification failed/);
+  assert.match(shell, /getbeeapi\.com\/releases\/latest\/download/);
   assert.match(shell, /github\.com\/BeeAPI-AI\/beeapi\/releases/);
   assert.match(shell, /\( : <\/dev\/tty \) 2>\/dev\/null/);
-  assert.match(shell, /exec "\$install_dir\/beeapi" <\/dev\/tty/);
+  assert.match(shell, /"\$install_dir\/beeapi" <\/dev\/tty/);
+  assert.match(shell, /getbeeapi PATH/);
   assert.match(shell, /cannot enforce HTTPS-only redirects/);
   assert.match(powerShell, /Get-FileHash -Algorithm SHA256/);
+  assert.match(powerShell, /getbeeapi\.com\/releases\/latest\/download/);
   assert.match(powerShell, /github\.com\/BeeAPI-AI\/beeapi\/releases/);
   assert.match(powerShell, /& \$Target/);
   assert.match(component, /irm https:\/\/getbeeapi\.com\/install\.ps1 \| iex/);

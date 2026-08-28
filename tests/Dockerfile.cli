@@ -1,0 +1,13 @@
+FROM golang:1.24-bookworm
+
+WORKDIR /src
+COPY go.mod ./
+COPY cmd ./cmd
+COPY internal ./internal
+COPY public/install.sh ./public/install.sh
+COPY tests/cli-linux-smoke.sh ./tests/cli-linux-smoke.sh
+COPY tests/fixtures/bin/curl ./tests/fixtures/bin/curl
+
+RUN chmod +x ./tests/cli-linux-smoke.sh ./tests/fixtures/bin/curl \
+    && env GOCACHE=/tmp/getbeeapi-go-cache go test -buildvcs=false ./cmd/... ./internal/... \
+    && ./tests/cli-linux-smoke.sh

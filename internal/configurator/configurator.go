@@ -27,6 +27,7 @@ var SupportedAgents = []string{
 type Options struct {
 	Endpoint   string
 	APIKey     string
+	APIKeys    map[string]string
 	Model      string
 	Models     map[string]string
 	Agents     []string
@@ -46,16 +47,32 @@ func Apply(store *state.Store, options Options) (Result, error) {
 	options.Endpoint = strings.TrimRight(strings.TrimSpace(options.Endpoint), "/")
 	options.APIKey = strings.TrimSpace(options.APIKey)
 	options.Model = strings.TrimSpace(options.Model)
-	if options.Endpoint == "" || options.APIKey == "" {
-		return Result{}, errors.New("入口和 API Key 均不能为空")
+	if options.Endpoint == "" {
+		return Result{}, errors.New("入口不能为空")
 	}
 	agents, err := normalizeAgents(options.Agents)
 	if err != nil {
 		return Result{}, err
 	}
+	shared := map[string]struct{ key, model string }{}
 	home, err := targetHome()
 	if err != nil {
 		return Result{}, err
+	}
+	for _, agent := range agents {
+		key := apiKeyForAgent(options, agent)
+		model := modelForAgent(options, agent)
+		if key == "" {
+			return Result{}, fmt.Errorf("没有为 %s 选择 API Key", agent)
+		}
+		if model == "" {
+			return Result{}, fmt.Errorf("没有为 %s 选择模型", agent)
+		}
+		path := pathForAgent(home, agent)
+		if previous, ok := shared[path]; ok && (previous.key != key || previous.model != model) {
+			return Result{}, fmt.Errorf("%s 与另一个工具共享配置文件，必须使用相同凭据和模型", agent)
+		}
+		shared[path] = struct{ key, model string }{key: key, model: model}
 	}
 	paths := targetPaths(home, agents)
 	backup, err := store.CreateBackup(paths)
@@ -69,9 +86,6 @@ func Apply(store *state.Store, options Options) (Result, error) {
 		if written[path] {
 			appendHint(&result, agent)
 			continue
-		}
-		if modelForAgent(options, agent) == "" {
-			return Result{}, fmt.Errorf("没有为 %s 选择模型", agent)
 		}
 		if err := writeAgent(path, agent, options); err != nil {
 			_, _ = store.Rollback(backup.ID)
@@ -175,11 +189,12 @@ func pathForAgent(home, agent string) string {
 
 func writeAgent(path, agent string, options Options) error {
 	model := modelForAgent(options, agent)
+	apiKey := apiKeyForAgent(options, agent)
 	switch agent {
 	case "claude", "claude-desktop":
 		return mergeJSON(path, map[string]any{
 			"env": map[string]any{
-				"ANTHROPIC_AUTH_TOKEN":           options.APIKey,
+				"ANTHROPIC_AUTH_TOKEN":           apiKey,
 				"ANTHROPIC_BASE_URL":             options.Endpoint + "/anthropic",
 				"ANTHROPIC_MODEL":                model,
 				"ANTHROPIC_DEFAULT_HAIKU_MODEL":  model,
@@ -195,8 +210,6 @@ func writeAgent(path, agent string, options Options) error {
 		content := `# Managed by GetBeeAPI. The official ChatGPT login in auth.json is untouched.
 model_provider = "beeapi"
 model = ` + strconv.Quote(model) + `
-model_reasoning_effort = "high"
-disable_response_storage = true
 
 [model_providers.beeapi]
 name = "BeeAPI"
@@ -205,7 +218,7 @@ wire_api = "responses"
 
 [model_providers.beeapi.auth]
 command = ` + strconv.Quote(binary) + `
-args = ["token", "print"]
+args = ["token", "print", "--agent", "codex"]
 refresh_interval_ms = 0
 timeout_ms = 5000
 `
@@ -213,7 +226,7 @@ timeout_ms = 5000
 	case "gemini":
 		content := "# Managed by GetBeeAPI; use with: beeapi run gemini\n" +
 			"GOOGLE_GEMINI_BASE_URL=" + shellQuote(options.Endpoint) + "\n" +
-			"GEMINI_API_KEY=" + shellQuote(options.APIKey) + "\n" +
+			"GEMINI_API_KEY=" + shellQuote(apiKey) + "\n" +
 			"GEMINI_MODEL=" + shellQuote(model) + "\n"
 		return secureWrite(path, []byte(content))
 	case "grok":
@@ -239,7 +252,7 @@ default = "beeapi"
 					"name": "BeeAPI",
 					"options": map[string]any{
 						"baseURL": options.Endpoint + "/v1",
-						"apiKey":  options.APIKey,
+						"apiKey":  apiKey,
 					},
 					"models": map[string]any{model: map[string]any{"name": model}},
 				},
@@ -253,7 +266,7 @@ default = "beeapi"
 				"providers": map[string]any{
 					"beeapi": map[string]any{
 						"baseUrl": options.Endpoint + "/v1",
-						"apiKey":  options.APIKey,
+						"apiKey":  apiKey,
 						"api":     "openai-responses",
 						"models":  []any{map[string]any{"id": model, "name": model}},
 					},
@@ -271,6 +284,15 @@ default = "beeapi"
 	default:
 		return fmt.Errorf("未知智能体: %s", agent)
 	}
+}
+
+func apiKeyForAgent(options Options, agent string) string {
+	if options.APIKeys != nil {
+		if key := strings.TrimSpace(options.APIKeys[agent]); key != "" {
+			return key
+		}
+	}
+	return strings.TrimSpace(options.APIKey)
 }
 
 func modelForAgent(options Options, agent string) string {

@@ -3,6 +3,7 @@ package routeopt
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -11,7 +12,7 @@ import (
 func TestCFSTArgsProbeTheBeeAPIBusinessEndpoint(t *testing.T) {
 	args := cfstArgs("/tmp/ip.txt", "/tmp/result.csv", "beeapi.ai")
 	joined := strings.Join(args, " ")
-	wantURL := "https://beeapi.ai/api/v1/public/api-endpoints"
+	wantURL := "https://beeapi.ai/healthz"
 	if !slices.Contains(args, wantURL) {
 		t.Fatalf("CFST args are missing business probe URL %q: %#v", wantURL, args)
 	}
@@ -39,6 +40,26 @@ func TestCFSTPermissionErrorExplainsNoExecCache(t *testing.T) {
 	err := cfstRunError(os.ErrPermission)
 	if !strings.Contains(err.Error(), "noexec") || !strings.Contains(err.Error(), "GETBEE_CACHE") {
 		t.Fatalf("unexpected permission error: %v", err)
+	}
+}
+
+func TestCFSTDownloadSourcesPreferFixedEdgeCache(t *testing.T) {
+	sources := cfstDownloadSources(
+		"v2.3.5",
+		"cfst_linux_amd64.tar.gz",
+		"https://github.com/XIU2/CloudflareSpeedTest/releases/download/v2.3.5/cfst_linux_amd64.tar.gz",
+	)
+	want := []string{
+		"https://getbeeapi.com/releases/cfst/v2.3.5/cfst_linux_amd64.tar.gz",
+		"https://github.com/XIU2/CloudflareSpeedTest/releases/download/v2.3.5/cfst_linux_amd64.tar.gz",
+	}
+	if !reflect.DeepEqual(sources, want) {
+		t.Fatalf("sources = %#v, want %#v", sources, want)
+	}
+
+	sources = cfstDownloadSources("../../bad", "cfst_linux_amd64.tar.gz", want[1])
+	if !reflect.DeepEqual(sources, []string{want[1]}) {
+		t.Fatalf("unsafe tag should disable the mirror URL: %#v", sources)
 	}
 }
 

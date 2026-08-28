@@ -5,30 +5,23 @@ const phases = [
   {
     number: "01",
     key: "ROUTE",
-    title: "线路优选",
-    description: "先检查 beeapi.ai 与 beeapi.dev；需要时从可访问的 Cloudflare IP 中，选择延迟更低、表现更稳定的一条。",
-    note: "可访问性 → API 延迟排序 → 安全复验",
+    title: "选择可用入口",
+    description: "先检查内置域名的健康状态，再读取并验证 BeeAPI 官方入口列表。能直接访问就使用最快入口；确实不可用时才进入 IP 优选。",
+    note: "healthz → 官方列表 → 按需优选",
   },
   {
     number: "02",
     key: "AUTH",
-    title: "登录并选择 Key",
-    description: "在 BeeAPI 官方页面登录并选择一枚已有 Key，也可以直接粘贴 API Key 作为兼容方式。",
-    note: "网页授权 / API Key",
+    title: "连接 BeeAPI",
+    description: "在 BeeAPI 官方页面登录、核对设备，并选择 1–10 个密钥配置。批准后，CLI 领取对应的设备专用 Key 并分别读取可用模型；也可直接粘贴单个 Key。",
+    note: "网页选配置 → 设备凭据 → 获取模型",
   },
   {
     number: "03",
-    key: "DETECT",
-    title: "发现本地工具",
-    description: "识别已安装的 CLI 与现有配置，给出适合当前环境的建议，也允许提前准备其他工具。",
-    note: "binary + config",
-  },
-  {
-    number: "04",
     key: "APPLY",
-    title: "完成配置",
-    description: "为多个 AI 工具选择模型，统一备份后写入；任一步失败，都可以恢复整个配置批次。",
-    note: "backup → merge → verify",
+    title: "配置本地工具",
+    description: "识别已有 CLI 和配置文件，多选目标工具，为每个工具选择密钥配置与模型；统一备份后写入，任一步失败都可恢复整个批次。",
+    note: "detect → credential → model → apply",
   },
 ];
 
@@ -49,16 +42,16 @@ const endpoints = [
 ];
 
 const safeguards = [
-  { title: "下载可验证", text: "测速组件只取自 XIU2 官方 GitHub Release，并核对发布摘要。" },
+  { title: "下载可验证", text: "发行文件来源固定；优先走 GetBeeAPI 边缘缓存，失败回退 GitHub，并始终核对 SHA-256。" },
   { title: "线路可验证", text: "候选 IP 仍使用 BeeAPI 域名完成 TLS 握手，证书不匹配立即拒绝。" },
   { title: "修改可恢复", text: "配置与 Hosts 写入前分别备份，受管区块不触碰用户的其他内容。" },
-  { title: "凭据有边界", text: "短期 CLI 登录令牌只负责选择一枚现有 Key，不替代模型 API Key。" },
+  { title: "凭据有边界", text: "短期 CLI 令牌只领取网页批准的设备专用 Key；账户原 Key 与网页登录会话不会进入 CLI。" },
 ];
 
 const faqs = [
   {
     question: "线路优选具体在选择什么？",
-    answer: "先用 BeeAPI 公共接口筛选真正可访问的 Cloudflare IP，再根据 API 延迟、丢包与多次探测结果排序。最终候选还要通过 BeeAPI 域名的 TLS 与 API 响应验证。",
+    answer: "正常入口可访问时不会启动优选。只有需要修复或你主动选择时，才根据 /healthz 延迟、丢包与多次探测结果筛选 Cloudflare IP；最终候选还要通过 BeeAPI 域名的 TLS 与健康响应验证。",
   },
   {
     question: "它会直接覆盖我现有的配置吗？",
@@ -69,8 +62,8 @@ const faqs = [
     answer: "不会。只有官方入口不可用，或你主动希望使用更快线路时，CLI 才会在展示结果后请求写入；原始 Hosts 会先完整备份。",
   },
   {
-    question: "BeeAPI 还没上线网页授权怎么办？",
-    answer: "选择第二项，粘贴 BeeAPI 控制台生成的 API Key 即可。CLI 不会因此退回到账户密码登录。",
+    question: "不方便使用网页授权怎么办？",
+    answer: "选择第二项，粘贴 BeeAPI 控制台生成的单个 API Key 即可。兼容模式仍不会要求账户密码。",
   },
   {
     question: "Claude Desktop 的普通聊天也会切换到 BeeAPI 吗？",
@@ -113,7 +106,7 @@ export default function Home() {
         <div className="status-pill"><span />BEEAPI CONFIGURATOR · 8 TOOLS</div>
         <h1 aria-label="把 BeeAPI，接入你常用的 AI 工具。">把 BeeAPI，接入你<br />常用的 <span>AI 工具。</span></h1>
         <p className="hero-description">
-          GetBeeAPI 是 BeeAPI 的快捷配置器。它识别本机已有工具，连接你的 BeeAPI Key 与模型，备份原配置后完成写入——不用再逐个寻找配置文件和字段。
+          GetBeeAPI 是 BeeAPI 的快捷配置器。它识别本机已有工具，连接你的 BeeAPI 密钥配置与模型，备份原配置后完成写入——不用再逐个寻找配置文件和字段。
         </p>
 
         <div className="hero-positioning" aria-label="GetBeeAPI 产品定位">
@@ -131,7 +124,7 @@ export default function Home() {
           </div>
         </div>
 
-        <p className="hero-hint">安装完成后输入 <code>beeapi</code>：选择 Key、模型和需要配置的工具。</p>
+        <p className="hero-hint">首次输入 <code>beeapi</code> 完成三步设置；以后输入则打开功能主页。</p>
 
         <div className="hero-toolrail" aria-label="GetBeeAPI 支持的工具">
           <p>一条命令，配置这些工具</p>
@@ -198,7 +191,7 @@ export default function Home() {
           <div className="config-flow" aria-label="配置写入流程">
             <span>环境扫描</span><i />
             <span>多选工具</span><i />
-            <span>匹配模型</span><i />
+            <span>分配密钥与模型</span><i />
             <span>统一备份</span><i />
             <span>写入验证</span>
           </div>
@@ -229,8 +222,8 @@ export default function Home() {
       <section className="content-section shell" id="workflow">
         <div className="section-heading centered-heading">
           <p className="section-kicker">HOW IT WORKS</p>
-          <h2>从 BeeAPI Key，到工具里的可用配置。</h2>
-          <p>GetBeeAPI 把入口选择、账户连接、环境识别和配置写入整理成一条可回滚的流程。</p>
+          <h2>从 BeeAPI 密钥配置，到工具里的可用模型。</h2>
+          <p>首次运行只有三步：可用入口、BeeAPI 连接、工具与模型配置。完成后再次输入 beeapi，会直接进入日常功能主页。</p>
         </div>
         <ol className="workflow-list">
           {phases.map((phase) => (
@@ -250,7 +243,7 @@ export default function Home() {
             <p className="section-kicker">AUTHORIZATION</p>
             <h2>用熟悉的方式，<br />连接 BeeAPI。</h2>
           </div>
-          <p>推荐在 BeeAPI 官方网页完成登录与 Key 选择；如果更习惯现有 Key，也可以直接粘贴。两种方式都不会让 CLI 接触账号密码。</p>
+          <p>推荐在 BeeAPI 官方网页完成登录、核对设备并选择密钥配置；批准后 CLI 只领取新建的设备专用 Key。也可以直接粘贴单个 Key。两种方式都不会让 CLI 接触账号密码。</p>
         </div>
 
         <div className="auth-grid">
@@ -259,8 +252,8 @@ export default function Home() {
               <span className="choice-number">01</span>
               <span className="recommended-pill"><i />推荐</span>
             </div>
-            <h3>网页登录并选择 Key</h3>
-            <p>浏览器批准设备登录后，CLI 只显示 Key 名称与前缀供你选择。确认后，一次性交付你选中的那一枚到本机。</p>
+            <h3>网页登录并批准设备</h3>
+            <p>在官方网页选择 1–10 个可用密钥配置并批准。BeeAPI 会为本设备创建相互独立、可单独撤销的 Key；CLI 不会读取账户原 Key 的明文。</p>
             <div className="browser-preview" aria-label="BeeAPI 网页授权界面示意">
               <div className="browser-preview-bar">
                 <span><i />beeapi.ai/cli/authorize</span>
@@ -269,12 +262,12 @@ export default function Home() {
               <div className="approval-preview">
                 <span className="preview-icon">B</span>
                 <p><strong>GetBeeAPI 请求登录</strong><small>设备代码 · HM7K-WQ2P</small></p>
-                <span className="mock-button">批准登录</span>
+                <span className="mock-button">选择配置并批准</span>
               </div>
             </div>
             <ul className="quiet-list">
               <li>密码、2FA 与网页 Cookie 不进入 CLI</li>
-              <li>短期登录令牌与模型 API Key 完全分离</li>
+              <li>每个设备 Key 都能在 BeeAPI 账户页独立撤销</li>
             </ul>
           </article>
 
@@ -299,7 +292,7 @@ export default function Home() {
 
         <div className="service-note">
           <span>BeeAPI 服务端契约</span>
-          <p>设备授权、短期 CLI 登录令牌、Key 摘要列表与“一次导出一枚”相互隔离；普通 API Key 不能访问账户接口。</p>
+          <p>设备授权使用进程内临时 DPoP 密钥绑定；短期配置令牌只能领取网页已批准的设备凭据，不能访问 /me、模型转发或其他账户管理接口。</p>
           <a href="https://github.com/BeeAPI-AI/beeapi/blob/main/docs/device-authorization.md">查看设计文档 <span>↗</span></a>
         </div>
       </section>

@@ -3,6 +3,7 @@ package beeapi
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -42,12 +43,54 @@ func (fn roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error)
 
 func TestNormalizeBaseURLRejectsUnsafeValues(t *testing.T) {
 	for _, raw := range []string{"http://beeapi.ai", "https://user@beeapi.ai", "file:///etc/hosts", "not-a-url"} {
-		if got := normalizeBaseURL(raw); got != "" {
-			t.Errorf("normalizeBaseURL(%q) = %q, want empty", raw, got)
+		if got := NormalizeBaseURL(raw); got != "" {
+			t.Errorf("NormalizeBaseURL(%q) = %q, want empty", raw, got)
 		}
 	}
-	if got := normalizeBaseURL("https://beeapi.ai/path?q=1#x"); got != "https://beeapi.ai" {
+	if got := NormalizeBaseURL("https://beeapi.ai/path?q=1#x"); got != "https://beeapi.ai" {
 		t.Fatalf("normalized URL = %q", got)
+	}
+}
+
+func TestProbeEndpointsUsesHealthzAndRequiresHealthyJSON(t *testing.T) {
+	previousTransport := http.DefaultTransport
+	healthStatus := "ok"
+	requestedPath := ""
+	http.DefaultTransport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		requestedPath = r.URL.Path
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(bytes.NewBufferString(`{"status":"` + healthStatus + `"}`)),
+			Request:    r,
+		}, nil
+	})
+	t.Cleanup(func() { http.DefaultTransport = previousTransport })
+
+	items := ProbeEndpoints(context.Background(), []Endpoint{{Name: "测试入口", BaseURL: "https://beeapi.test"}})
+	if len(items) != 1 || !items[0].Reachable {
+		t.Fatalf("healthy endpoint was not accepted: %#v", items)
+	}
+	if requestedPath != "/healthz" {
+		t.Fatalf("probe path = %q, want /healthz", requestedPath)
+	}
+
+	healthStatus = "degraded"
+	items = ProbeEndpoints(context.Background(), []Endpoint{{Name: "异常入口", BaseURL: "https://beeapi.test"}})
+	if len(items) != 1 || items[0].Reachable || items[0].Error == "" {
+		t.Fatalf("unhealthy endpoint was accepted: %#v", items)
+	}
+}
+
+func TestEndpointNamesAvoidInternationalLabels(t *testing.T) {
+	if got := endpointName("https://beeapi.ai", "International"); got != "主域名" {
+		t.Fatalf("beeapi.ai name = %q", got)
+	}
+	if got := endpointName("https://beeapi.dev", "International backup"); got != "备用域名" {
+		t.Fatalf("beeapi.dev name = %q", got)
+	}
+	if got := endpointName("https://beeapi.ai.attacker.test", "External"); got != "External" {
+		t.Fatalf("lookalike domain was mislabeled as official: %q", got)
 	}
 }
 
@@ -56,7 +99,20 @@ func TestDeviceAuthAcceptsStandardOAuthResponseAndError(t *testing.T) {
 	requests := 0
 	client.HTTP = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		requests++
+		if r.Header.Get("DPoP") == "" {
+			t.Fatalf("request %d is missing its DPoP proof", requests)
+		}
+		if got := r.Header.Get("Authorization"); got != "" {
+			t.Fatalf("public device request unexpectedly has authorization: %q", got)
+		}
 		if requests == 1 {
+			var requestBody map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+				t.Fatal(err)
+			}
+			if requestBody["scope"] != "cli:configure" {
+				t.Fatalf("unexpected device scope: %#v", requestBody["scope"])
+			}
 			return &http.Response{
 				StatusCode: http.StatusOK,
 				Header:     make(http.Header),
@@ -86,39 +142,36 @@ func TestDeviceAuthAcceptsStandardOAuthResponseAndError(t *testing.T) {
 	}
 }
 
-func TestCLISessionListsAndExportsOneExistingKey(t *testing.T) {
+func TestCLISessionClaimsDeviceSpecificCredentials(t *testing.T) {
 	client := New("https://beeapi.test")
 	client.Token = "beecli-session"
 	requests := 0
 	client.HTTP = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		requests++
-		if got := r.Header.Get("Authorization"); got != "Bearer beecli-session" {
+		if got := r.Header.Get("Authorization"); got != "DPoP beecli-session" {
 			t.Fatalf("unexpected CLI authorization header: %q", got)
 		}
-		var body string
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/cli/api-keys":
-			body = `{"code":0,"message":"ok","data":{"items":[{"id":42,"name":"daily","key_prefix":"sk-bee-12ab","status":"active","group_name":"default","exportable":true}]}}`
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/cli/api-keys/42/export":
-			body = `{"code":0,"message":"ok","data":{"api_key":"sk-existing-secret"}}`
-		default:
+		if r.Header.Get("DPoP") == "" {
+			t.Fatal("protected CLI request is missing its DPoP proof")
+		}
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/cli/credentials/claim" {
 			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
+		body := `{"code":0,"message":"ok","data":{"credentials":[{"credential_id":"bcc_grant-1","profile_name":"daily","source_key_prefix":"sk-source","device_key_name":"CLI · daily","device_key_prefix":"sk-device","api_key":"sk-device-secret"},{"credential_id":"bcc_grant-2","profile_name":"coding","source_key_prefix":"sk-source-2","device_key_name":"CLI · coding","device_key_prefix":"sk-device-2","api_key":"sk-device-secret-2"}],"retry_until":"2026-08-28T12:00:00Z"}}`
 		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewBufferString(body)), Request: r}, nil
 	})}
 
-	keys, err := client.CLIAPIKeys(context.Background())
+	claim, err := client.ClaimCLICredentials(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(keys) != 1 || keys[0].Name != "daily" || !keys[0].Exportable {
-		t.Fatalf("unexpected key summaries: %#v", keys)
+	if len(claim.Credentials) != 2 || claim.Credentials[0].ProfileName != "daily" {
+		t.Fatalf("unexpected credentials: %#v", claim.Credentials)
 	}
-	secret, err := client.ExportCLIAPIKey(context.Background(), keys[0].ID)
-	if err != nil {
-		t.Fatal(err)
+	if claim.Credentials[0].APIKey != "sk-device-secret" || claim.Credentials[1].CredentialID != "bcc_grant-2" {
+		t.Fatalf("claim payload was not decoded: %#v", claim.Credentials)
 	}
-	if secret != "sk-existing-secret" || requests != 2 {
-		t.Fatalf("unexpected exported key: %q (requests=%d)", secret, requests)
+	if requests != 1 {
+		t.Fatalf("claim request count = %d, want 1", requests)
 	}
 }

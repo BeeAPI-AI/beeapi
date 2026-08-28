@@ -25,6 +25,8 @@ type Client struct {
 	BaseURL string
 	Token   string
 	HTTP    *http.Client
+	dpopMu  sync.Mutex
+	dpop    *dpopSigner
 }
 
 func New(baseURL string) *Client {
@@ -55,7 +57,19 @@ type envelope struct {
 	Reason  string          `json:"reason"`
 }
 
+type proofMode uint8
+
+const (
+	proofNone proofMode = iota
+	proofPublic
+	proofProtected
+)
+
 func (c *Client) request(ctx context.Context, method, path string, body, out any) error {
+	return c.requestWithProof(ctx, method, path, body, out, proofNone)
+}
+
+func (c *Client) requestWithProof(ctx context.Context, method, path string, body, out any, mode proofMode) error {
 	var payload io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -64,7 +78,8 @@ func (c *Client) request(ctx context.Context, method, path string, body, out any
 		}
 		payload = bytes.NewReader(b)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.BaseURL+apiPrefix+path, payload)
+	targetURI := c.BaseURL + apiPrefix + path
+	req, err := http.NewRequestWithContext(ctx, method, targetURI, payload)
 	if err != nil {
 		return err
 	}
@@ -73,7 +88,25 @@ func (c *Client) request(ctx context.Context, method, path string, body, out any
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	if c.Token != "" {
+	if mode != proofNone {
+		signer, signerErr := c.ensureDPoP()
+		if signerErr != nil {
+			return signerErr
+		}
+		accessToken := ""
+		if mode == proofProtected {
+			accessToken = strings.TrimSpace(c.Token)
+			if accessToken == "" {
+				return errors.New("缺少 BeeAPI CLI 配置令牌")
+			}
+			req.Header.Set("Authorization", "DPoP "+accessToken)
+		}
+		proof, proofErr := signer.proof(method, targetURI, accessToken, time.Now())
+		if proofErr != nil {
+			return proofErr
+		}
+		req.Header.Set("DPoP", proof)
+	} else if c.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.Token)
 	}
 	resp, err := c.HTTP.Do(req)
@@ -132,6 +165,20 @@ func (c *Client) request(ctx context.Context, method, path string, body, out any
 	return json.Unmarshal(env.Data, out)
 }
 
+func (c *Client) ensureDPoP() (*dpopSigner, error) {
+	c.dpopMu.Lock()
+	defer c.dpopMu.Unlock()
+	if c.dpop != nil {
+		return c.dpop, nil
+	}
+	signer, err := newDPoPSigner()
+	if err != nil {
+		return nil, fmt.Errorf("创建 DPoP 设备密钥: %w", err)
+	}
+	c.dpop = signer
+	return signer, nil
+}
+
 type Endpoint struct {
 	ID        string        `json:"id"`
 	Name      string        `json:"name"`
@@ -158,11 +205,11 @@ func DiscoverEndpoints(ctx context.Context, bootstraps []string) []Endpoint {
 	}
 	seen := map[string]Endpoint{}
 	for _, raw := range bootstraps {
-		base := normalizeBaseURL(raw)
+		base := NormalizeBaseURL(raw)
 		if base == "" {
 			continue
 		}
-		seen[base] = Endpoint{Name: fallbackName(base), BaseURL: base}
+		seen[base] = Endpoint{Name: endpointName(base, ""), BaseURL: base}
 	}
 	initial := make([]Endpoint, 0, len(seen))
 	for _, item := range seen {
@@ -187,8 +234,9 @@ func DiscoverEndpoints(ctx context.Context, bootstraps []string) []Endpoint {
 			continue
 		}
 		for _, item := range items {
-			item.BaseURL = normalizeBaseURL(item.BaseURL)
+			item.BaseURL = NormalizeBaseURL(item.BaseURL)
 			if item.BaseURL != "" {
+				item.Name = endpointName(item.BaseURL, item.Name)
 				seen[item.BaseURL] = item
 			}
 		}
@@ -214,16 +262,21 @@ func ProbeEndpoints(ctx context.Context, items []Endpoint) []Endpoint {
 			started := time.Now()
 			probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			defer cancel()
-			req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, item.BaseURL+apiPrefix+"/public/api-endpoints", nil)
+			req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, item.BaseURL+"/healthz", nil)
 			if err == nil {
 				req.Header.Set("Accept", "application/json")
 				resp, doErr := (&http.Client{Timeout: 5 * time.Second}).Do(req)
 				err = doErr
 				if resp != nil {
-					io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+					var health struct {
+						Status string `json:"status"`
+					}
+					decodeErr := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&health)
 					resp.Body.Close()
-					if err == nil && (resp.StatusCode < 200 || resp.StatusCode >= 400) {
+					if err == nil && resp.StatusCode != http.StatusOK {
 						err = fmt.Errorf("HTTP %d", resp.StatusCode)
+					} else if err == nil && (decodeErr != nil || !strings.EqualFold(strings.TrimSpace(health.Status), "ok")) {
+						err = errors.New("healthz 响应无效")
 					}
 				}
 			}
@@ -260,7 +313,7 @@ func BestEndpoint(items []Endpoint) (Endpoint, error) {
 	return Endpoint{}, errors.New("没有检测到可用的 BeeAPI 官方入口")
 }
 
-func normalizeBaseURL(raw string) string {
+func NormalizeBaseURL(raw string) string {
 	raw = strings.TrimSpace(strings.TrimRight(raw, "/"))
 	u, err := url.Parse(raw)
 	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil {
@@ -270,11 +323,19 @@ func normalizeBaseURL(raw string) string {
 	return strings.TrimRight(u.String(), "/")
 }
 
-func fallbackName(base string) string {
-	if strings.Contains(base, "beeapi.dev") {
-		return "国内备用"
+func endpointName(base, serverName string) string {
+	parsed, _ := url.Parse(base)
+	hostname := strings.TrimSuffix(strings.ToLower(parsed.Hostname()), ".")
+	if hostname == "beeapi.dev" {
+		return "备用域名"
 	}
-	return "国际"
+	if hostname == "beeapi.ai" {
+		return "主域名"
+	}
+	if strings.TrimSpace(serverName) != "" {
+		return strings.TrimSpace(serverName)
+	}
+	return "官方入口"
 }
 
 type DeviceCode struct {
@@ -300,79 +361,55 @@ type DeviceToken struct {
 func (c *Client) StartDeviceAuth(ctx context.Context) (DeviceCode, error) {
 	var code DeviceCode
 	deviceName, _ := os.Hostname()
-	err := c.request(ctx, http.MethodPost, "/auth/device/code", map[string]any{
+	err := c.requestWithProof(ctx, http.MethodPost, "/auth/device/code", map[string]any{
 		"client_id":   "getbeeapi-cli",
-		"scope":       "api-keys:list api-keys:export-one",
+		"scope":       "cli:configure",
 		"device_name": deviceName,
 		"platform":    runtime.GOOS + "/" + runtime.GOARCH,
-	}, &code)
+	}, &code, proofPublic)
 	return code, err
 }
 
 func (c *Client) PollDeviceAuth(ctx context.Context, deviceCode string) (DeviceToken, error) {
 	var token DeviceToken
-	err := c.request(ctx, http.MethodPost, "/auth/device/token", map[string]string{
+	err := c.requestWithProof(ctx, http.MethodPost, "/auth/device/token", map[string]string{
 		"client_id":   "getbeeapi-cli",
 		"device_code": deviceCode,
-	}, &token)
+	}, &token, proofPublic)
 	return token, err
 }
 
-type FlexibleID string
+// CLICredential is a newly-created, device-specific child API key. The
+// approval page chooses the source profiles; the CLI never receives or
+// reveals the user's original API keys.
+type CLICredential struct {
+	CredentialID    string `json:"credential_id"`
+	ProfileName     string `json:"profile_name"`
+	SourceKeyPrefix string `json:"source_key_prefix"`
+	DeviceKeyName   string `json:"device_key_name"`
+	DeviceKeyPrefix string `json:"device_key_prefix"`
+	APIKey          string `json:"api_key"`
+}
 
-func (id *FlexibleID) UnmarshalJSON(data []byte) error {
-	if len(data) == 0 || string(data) == "null" {
-		*id = ""
-		return nil
+type CLICredentialClaimResult struct {
+	Credentials []CLICredential `json:"credentials"`
+	RetryUntil  time.Time       `json:"retry_until"`
+}
+
+func (c *Client) ClaimCLICredentials(ctx context.Context) (CLICredentialClaimResult, error) {
+	var result CLICredentialClaimResult
+	if err := c.requestWithProof(ctx, http.MethodPost, "/cli/credentials/claim", map[string]string{}, &result, proofProtected); err != nil {
+		return result, err
 	}
-	if data[0] == '"' {
-		var value string
-		if err := json.Unmarshal(data, &value); err != nil {
-			return err
+	if len(result.Credentials) == 0 {
+		return result, errors.New("BeeAPI 没有返回已批准的设备凭据")
+	}
+	for _, credential := range result.Credentials {
+		if strings.TrimSpace(credential.CredentialID) == "" || strings.TrimSpace(credential.APIKey) == "" {
+			return CLICredentialClaimResult{}, errors.New("BeeAPI 返回的设备凭据不完整")
 		}
-		*id = FlexibleID(value)
-		return nil
 	}
-	*id = FlexibleID(string(data))
-	return nil
-}
-
-type CLIAPIKey struct {
-	ID         FlexibleID `json:"id"`
-	Name       string     `json:"name"`
-	KeyPrefix  string     `json:"key_prefix"`
-	Prefix     string     `json:"prefix"`
-	Status     string     `json:"status"`
-	GroupName  string     `json:"group_name"`
-	ExpiresAt  string     `json:"expires_at"`
-	Exportable bool       `json:"exportable"`
-}
-
-func (c *Client) CLIAPIKeys(ctx context.Context) ([]CLIAPIKey, error) {
-	var result struct {
-		Items []CLIAPIKey `json:"items"`
-	}
-	if err := c.request(ctx, http.MethodGet, "/cli/api-keys", nil, &result); err != nil {
-		return nil, err
-	}
-	return result.Items, nil
-}
-
-func (c *Client) ExportCLIAPIKey(ctx context.Context, id FlexibleID) (string, error) {
-	var result struct {
-		APIKey    string `json:"api_key"`
-		Plaintext string `json:"plaintext"`
-	}
-	if err := c.request(ctx, http.MethodPost, "/cli/api-keys/"+url.PathEscape(string(id))+"/export", map[string]string{}, &result); err != nil {
-		return "", err
-	}
-	if result.APIKey != "" {
-		return result.APIKey, nil
-	}
-	if result.Plaintext != "" {
-		return result.Plaintext, nil
-	}
-	return "", errors.New("BeeAPI 没有返回所选 API Key")
+	return result, nil
 }
 
 type Model struct {

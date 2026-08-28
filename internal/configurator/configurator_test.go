@@ -59,9 +59,14 @@ func TestApplyMergesBacksUpAndRollsBack(t *testing.T) {
 	if strings.Contains(string(codex), "sk-secret-value") {
 		t.Fatal("Codex profile contains the API key instead of command-backed auth")
 	}
-	for _, want := range []string{"wire_api = \"responses\"", "command = \"/usr/local/bin/beeapi\"", "args = [\"token\", \"print\"]"} {
+	for _, want := range []string{"wire_api = \"responses\"", "command = \"/usr/local/bin/beeapi\"", "args = [\"token\", \"print\", \"--agent\", \"codex\"]"} {
 		if !strings.Contains(string(codex), want) {
 			t.Fatalf("Codex profile is missing %q:\n%s", want, codex)
+		}
+	}
+	for _, unsupported := range []string{"disable_response_storage", "model_reasoning_effort"} {
+		if strings.Contains(string(codex), unsupported) {
+			t.Fatalf("Codex profile contains an unnecessary or unsupported setting %q:\n%s", unsupported, codex)
 		}
 	}
 
@@ -190,5 +195,118 @@ func TestApplyDeduplicatesClaudeSharedSettings(t *testing.T) {
 	}
 	if len(result.Hints) != 1 || !strings.Contains(result.Hints[0], "Claude Desktop") {
 		t.Fatalf("desktop hint missing: %#v", result.Hints)
+	}
+}
+
+func TestApplyWritesEverySupportedToolAdapter(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	store := &state.Store{Dir: filepath.Join(root, "state")}
+	t.Setenv("GETBEE_TARGET_HOME", home)
+
+	models := map[string]string{}
+	for _, agent := range SupportedAgents {
+		models[agent] = "bee-model-" + agent
+	}
+	models["claude-desktop"] = models["claude"]
+	result, err := Apply(store, Options{
+		Endpoint:   "https://beeapi.ai",
+		APIKey:     "sk-all-tools",
+		Models:     models,
+		Agents:     append([]string(nil), SupportedAgents...),
+		BinaryPath: "/opt/getbeeapi/beeapi",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Claude Code and Claude Desktop intentionally share one settings file.
+	if len(result.Files) != len(SupportedAgents)-1 {
+		t.Fatalf("configured files = %d, want %d: %#v", len(result.Files), len(SupportedAgents)-1, result.Files)
+	}
+
+	checks := map[string][]string{
+		filepath.Join(home, ".claude", "settings.json"): {
+			"ANTHROPIC_BASE_URL", "https://beeapi.ai/anthropic", "sk-all-tools", "bee-model-claude",
+		},
+		filepath.Join(home, ".codex", "beeapi.config.toml"): {
+			`model_provider = "beeapi"`, `base_url = "https://beeapi.ai/v1"`, `command = "/opt/getbeeapi/beeapi"`,
+		},
+		filepath.Join(home, ".config", "getbeeapi", "gemini.env"): {
+			"GOOGLE_GEMINI_BASE_URL='https://beeapi.ai'", "GEMINI_API_KEY='sk-all-tools'", "bee-model-gemini",
+		},
+		filepath.Join(home, ".config", "getbeeapi", "grok", "config.toml"): {
+			"[model.beeapi]", `env_key = "BEEAPI_API_KEY"`, "bee-model-grok",
+		},
+		filepath.Join(home, ".config", "opencode", "opencode.json"): {
+			`"beeapi"`, `"baseURL": "https://beeapi.ai/v1"`, `"apiKey": "sk-all-tools"`, "bee-model-opencode",
+		},
+		filepath.Join(home, ".openclaw", "openclaw.json"): {
+			`"baseUrl": "https://beeapi.ai/v1"`, `"apiKey": "sk-all-tools"`, `"api": "openai-responses"`, "bee-model-openclaw",
+		},
+		filepath.Join(home, ".config", "getbeeapi", "hermes", "config.yaml"): {
+			"provider: custom", `base_url: "https://beeapi.ai/v1"`, "bee-model-hermes",
+		},
+	}
+	for path, fragments := range checks {
+		content, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatalf("read %s: %v", path, readErr)
+		}
+		for _, fragment := range fragments {
+			if !strings.Contains(string(content), fragment) {
+				t.Errorf("%s is missing %q:\n%s", path, fragment, content)
+			}
+		}
+	}
+
+	for _, path := range []string{
+		filepath.Join(home, ".codex", "beeapi.config.toml"),
+		filepath.Join(home, ".config", "getbeeapi", "grok", "config.toml"),
+		filepath.Join(home, ".config", "getbeeapi", "hermes", "config.yaml"),
+	} {
+		content, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if strings.Contains(string(content), "sk-all-tools") {
+			t.Errorf("wrapper-backed adapter leaked the API Key into %s", path)
+		}
+	}
+}
+
+func TestApplyUsesCredentialAssignedToEachTool(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	store := &state.Store{Dir: filepath.Join(root, "state")}
+	t.Setenv("GETBEE_TARGET_HOME", home)
+
+	_, err := Apply(store, Options{
+		Endpoint: "https://beeapi.ai",
+		APIKeys: map[string]string{
+			"claude":   "sk-claude-only",
+			"opencode": "sk-opencode-only",
+		},
+		Models: map[string]string{
+			"claude":   "claude-sonnet",
+			"opencode": "gpt-5-codex",
+		},
+		Agents: []string{"claude", "opencode"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claude, err := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	opencode, err := os.ReadFile(filepath.Join(home, ".config", "opencode", "opencode.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(claude), "sk-claude-only") || strings.Contains(string(claude), "sk-opencode-only") {
+		t.Fatalf("Claude received the wrong credential:\n%s", claude)
+	}
+	if !strings.Contains(string(opencode), "sk-opencode-only") || strings.Contains(string(opencode), "sk-claude-only") {
+		t.Fatalf("OpenCode received the wrong credential:\n%s", opencode)
 	}
 }

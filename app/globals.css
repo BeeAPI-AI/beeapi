@@ -278,7 +278,7 @@ main { min-height: 100vh; overflow: hidden; position: relative; }
   margin: 40px 0 0;
   padding: 19px 0 0;
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(3, 1fr);
   border-top: 1px solid rgba(26, 28, 46, 0.1);
   list-style: none;
 }
@@ -353,7 +353,7 @@ main { min-height: 100vh; overflow: hidden; position: relative; }
   margin: 62px 0 0;
   padding: 0;
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(3, 1fr);
   overflow: hidden;
   border: 1px solid var(--line);
   border-radius: 22px;
@@ -615,9 +615,7 @@ a:focus-visible, button:focus-visible, summary:focus-visible { outline: 2px soli
   .hero-tool:nth-child(5) { border-left: 0; }
   .tools-intro { grid-template-columns: 1fr 330px; gap: 48px; }
   .tool-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .workflow-list { grid-template-columns: 1fr 1fr; }
-  .workflow-list li:nth-child(3) { border-left: 0; border-top: 1px solid var(--line); }
-  .workflow-list li:nth-child(4) { border-top: 1px solid var(--line); }
+  .workflow-list { grid-template-columns: repeat(3, 1fr); }
   .split-heading { grid-template-columns: 1fr 350px; gap: 50px; }
   .network-layout { grid-template-columns: 1fr; gap: 60px; }
   .network-copy { max-width: 650px; }
@@ -654,8 +652,7 @@ a:focus-visible, button:focus-visible, summary:focus-visible { outline: 2px soli
   .command-platform { font-size: 9px; }
   .install-assurance { gap: 9px 17px; font-size: 9px; }
   .hero-hint { max-width: 300px; line-height: 1.7; }
-  .hero-flow { margin-top: 36px; grid-template-columns: 1fr 1fr; gap: 15px 0; }
-  .hero-flow li:nth-child(2)::after { display: none; }
+  .hero-flow { margin-top: 36px; grid-template-columns: repeat(3, 1fr); gap: 15px 0; }
   .hero-flow li { font-size: 10px; }
   .content-section { padding-top: 92px; padding-bottom: 92px; }
   .tools-section { padding: 92px 0; }

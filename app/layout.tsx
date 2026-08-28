@@ -18,7 +18,7 @@ export const metadata: Metadata = {
   description: "一条命令为 Claude Code、Claude Desktop、Codex、Gemini CLI、Grok Build、OpenCode、OpenClaw 与 Hermes 配置 BeeAPI。",
   openGraph: {
     title: "GetBeeAPI — 把 BeeAPI 接入你已经在用的 AI 工具",
-    description: "识别本地工具，选择 BeeAPI Key 与模型，备份后完成配置。",
+    description: "识别本地工具，为每个工具选择 BeeAPI 密钥配置与模型，备份后完成配置。",
     type: "website",
     locale: "zh_CN",
     url: "https://getbeeapi.com",
