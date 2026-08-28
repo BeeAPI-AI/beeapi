@@ -61,6 +61,8 @@ DPoP: <ES256 proof>
 }
 ```
 
+CLI 必须始终在终端显示完整的 `verification_uri_complete` 与 `user_code`，再尝试自动打开浏览器。SSH、无桌面环境或使用 `--no-open` 时不尝试本机跳转，而是提示用户在自己的电脑或手机浏览器打开该网址；自动打开失败也不能隐藏链接。若创建设备码接口返回 `404`、`405` 或 `501`，服务端没有生成 `device_code`，此时普通账户登录页不能代替本次设备授权，CLI 应明确说明并提供 API Key 回退。
+
 创建请求的 proof 必须包含正确的 `typ`、`alg`、公开 JWK、`htm=POST`、无查询参数的绝对 `htu`、时间窗口内的 `iat` 与一次性 `jti`。服务端保存 JWK thumbprint，并拒绝 proof 重放。
 
 ## 2. 网页批准

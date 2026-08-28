@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,15 +24,16 @@ import (
 )
 
 type runner struct {
-	ctx       context.Context
-	version   string
-	in        io.Reader
-	reader    *bufio.Reader
-	out       io.Writer
-	errOut    io.Writer
-	store     *state.Store
-	logoShown bool
-	optimize  func(string, bool, bool) (routeopt.Result, error)
+	ctx         context.Context
+	version     string
+	in          io.Reader
+	reader      *bufio.Reader
+	out         io.Writer
+	errOut      io.Writer
+	store       *state.Store
+	logoShown   bool
+	optimize    func(string, bool, bool) (routeopt.Result, error)
+	openBrowser func(string) error
 }
 
 type credentialMaterial struct {
@@ -499,14 +501,8 @@ func (r *runner) authorize(endpoint string, noOpen bool) ([]credentialMaterial, 
 	code, err := client.StartDeviceAuth(deviceCtx)
 	cancel()
 	if err == nil && code.DeviceCode != "" && code.UserCode != "" {
-		verifyURL := code.CompleteURI
-		if verifyURL == "" {
-			verifyURL = code.VerificationURI
-		}
-		fmt.Fprintf(r.out, "  在浏览器打开 %s\n", verifyURL)
-		fmt.Fprintf(r.out, "  输入授权码: %s\n", code.UserCode)
-		if !noOpen && verifyURL != "" {
-			_ = openURL(verifyURL)
+		if presentErr := r.presentDeviceAuthorization(endpoint, code, noOpen); presentErr != nil {
+			return nil, presentErr
 		}
 		credentials, pollErr := r.pollDevice(client, code)
 		if pollErr == nil {
@@ -520,6 +516,10 @@ func (r *runner) authorize(endpoint string, noOpen bool) ([]credentialMaterial, 
 	} else {
 		fmt.Fprintln(r.out, "  当前 BeeAPI 服务端尚未开启 CLI 设备授权。")
 	}
+	if loginURL := accountLoginURL(endpoint); loginURL != "" {
+		fmt.Fprintf(r.out, "  BeeAPI 账户登录页: %s\n", loginURL)
+	}
+	fmt.Fprintln(r.out, "  服务端尚未生成设备码，因此当前没有能批准本次 CLI 的授权网址；单独登录账户不会完成 CLI 授权。")
 	fmt.Fprintln(r.out, "  CLI 不会要求或接收 BeeAPI 账户密码。")
 	fallback, askErr := r.ask("  是否改用粘贴 API Key？[Y/n]: ")
 	if askErr != nil && !errors.Is(askErr, io.EOF) {
@@ -529,6 +529,90 @@ func (r *runner) authorize(endpoint string, noOpen bool) ([]credentialMaterial, 
 		return nil, errors.New("网站授权未完成")
 	}
 	return r.pasteAPIKey(endpoint)
+}
+
+func (r *runner) presentDeviceAuthorization(endpoint string, code beeapi.DeviceCode, noOpen bool) error {
+	verifyURL, err := deviceVerificationURL(endpoint, code)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(r.out, "  授权网址: %s\n", verifyURL)
+	fmt.Fprintf(r.out, "  设备授权码: %s\n", code.UserCode)
+	if noOpen {
+		fmt.Fprintln(r.out, "  已关闭自动打开；请复制以上网址到浏览器。")
+		return nil
+	}
+	if isHeadlessTerminal() {
+		fmt.Fprintln(r.out, "  检测到 SSH 或无桌面终端；请在你自己的电脑或手机浏览器打开以上网址。")
+		return nil
+	}
+	opener := r.openBrowser
+	if opener == nil {
+		opener = openURL
+	}
+	if err := opener(verifyURL); err != nil {
+		fmt.Fprintf(r.errOut, "  自动打开浏览器失败：%v\n", err)
+		fmt.Fprintln(r.out, "  请复制以上授权网址到浏览器继续。")
+		return nil
+	}
+	fmt.Fprintln(r.out, "  ✓ 已尝试打开浏览器；如果没有弹出，请复制以上授权网址。")
+	return nil
+}
+
+func deviceVerificationURL(endpoint string, code beeapi.DeviceCode) (string, error) {
+	endpointURL, err := url.Parse(endpoint)
+	if err != nil || endpointURL.Scheme != "https" || endpointURL.Hostname() == "" {
+		return "", errors.New("当前 BeeAPI 入口不是有效的 HTTPS 地址")
+	}
+	raw := strings.TrimSpace(code.CompleteURI)
+	complete := raw != ""
+	if raw == "" {
+		raw = strings.TrimSpace(code.VerificationURI)
+	}
+	if raw == "" {
+		raw = "/cli/authorize"
+	}
+	verifyURL, err := url.Parse(raw)
+	if err != nil {
+		return "", errors.New("BeeAPI 返回了无效的设备授权网址")
+	}
+	verifyURL = endpointURL.ResolveReference(verifyURL)
+	if verifyURL.Scheme != "https" || !trustedAuthorizationHost(endpointURL.Hostname(), verifyURL.Hostname()) {
+		return "", errors.New("BeeAPI 返回的设备授权网址不属于受信任的官方域名")
+	}
+	if !complete {
+		query := verifyURL.Query()
+		query.Set("user_code", code.UserCode)
+		verifyURL.RawQuery = query.Encode()
+	}
+	verifyURL.Fragment = ""
+	return verifyURL.String(), nil
+}
+
+func trustedAuthorizationHost(endpointHost, candidateHost string) bool {
+	candidateHost = strings.ToLower(strings.TrimSpace(candidateHost))
+	if candidateHost == strings.ToLower(strings.TrimSpace(endpointHost)) {
+		return true
+	}
+	for _, raw := range beeapi.BootstrapEndpoints {
+		u, err := url.Parse(raw)
+		if err == nil && strings.EqualFold(u.Hostname(), candidateHost) {
+			return true
+		}
+	}
+	return false
+}
+
+func accountLoginURL(endpoint string) string {
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Scheme != "https" || u.Hostname() == "" {
+		return ""
+	}
+	u.Path = "/login"
+	u.RawPath = ""
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String()
 }
 
 func (r *runner) pasteAPIKey(endpoint string) ([]credentialMaterial, error) {
@@ -1281,6 +1365,16 @@ func openURL(rawURL string) error {
 	default:
 		return exec.Command("xdg-open", rawURL).Start()
 	}
+}
+
+func isHeadlessTerminal() bool {
+	if strings.TrimSpace(os.Getenv("SSH_CONNECTION")) != "" || strings.TrimSpace(os.Getenv("SSH_TTY")) != "" {
+		return true
+	}
+	if runtime.GOOS == "linux" {
+		return strings.TrimSpace(os.Getenv("DISPLAY")) == "" && strings.TrimSpace(os.Getenv("WAYLAND_DISPLAY")) == ""
+	}
+	return false
 }
 
 func hostFromURL(rawURL string) string {

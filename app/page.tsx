@@ -267,6 +267,7 @@ export default function Home() {
             </div>
             <ul className="quiet-list">
               <li>密码、2FA 与网页 Cookie 不进入 CLI</li>
+              <li>SSH 终端会显示完整授权网址与设备码，可在其他设备打开</li>
               <li>每个设备 Key 都能在 BeeAPI 账户页独立撤销</li>
             </ul>
           </article>

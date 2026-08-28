@@ -49,6 +49,112 @@ func TestAuthorizeOffersExplicitAPIKeyFallbackWithoutPassword(t *testing.T) {
 	}
 }
 
+func TestDeviceAuthorizationPrintsCompleteURLForHeadlessTerminal(t *testing.T) {
+	t.Setenv("SSH_CONNECTION", "192.0.2.10 12345 192.0.2.20 22")
+	var output bytes.Buffer
+	opened := false
+	r := &runner{
+		out:    &output,
+		errOut: &output,
+		openBrowser: func(string) error {
+			opened = true
+			return nil
+		},
+	}
+	err := r.presentDeviceAuthorization("https://beeapi.dev", beeapi.DeviceCode{
+		UserCode:        "BEE7-K9Q2",
+		VerificationURI: "https://beeapi.ai/cli/authorize",
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opened {
+		t.Fatal("headless SSH terminal unexpectedly attempted to open a browser")
+	}
+	text := output.String()
+	for _, want := range []string{
+		"授权网址: https://beeapi.ai/cli/authorize?user_code=BEE7-K9Q2",
+		"设备授权码: BEE7-K9Q2",
+		"SSH 或无桌面终端",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("device authorization output is missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestDeviceAuthorizationReportsBrowserOpenFailure(t *testing.T) {
+	t.Setenv("SSH_CONNECTION", "")
+	t.Setenv("SSH_TTY", "")
+	t.Setenv("DISPLAY", ":99")
+	var output bytes.Buffer
+	r := &runner{
+		out:    &output,
+		errOut: &output,
+		openBrowser: func(string) error {
+			return errors.New("no browser")
+		},
+	}
+	err := r.presentDeviceAuthorization("https://beeapi.dev", beeapi.DeviceCode{
+		UserCode:    "BEE7-K9Q2",
+		CompleteURI: "https://beeapi.dev/cli/authorize?user_code=BEE7-K9Q2",
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := output.String()
+	if !strings.Contains(text, "自动打开浏览器失败") || !strings.Contains(text, "请复制以上授权网址") {
+		t.Fatalf("browser failure fallback is missing:\n%s", text)
+	}
+}
+
+func TestDeviceAuthorizationRejectsUntrustedVerificationURL(t *testing.T) {
+	_, err := deviceVerificationURL("https://beeapi.dev", beeapi.DeviceCode{
+		UserCode:    "BEE7-K9Q2",
+		CompleteURI: "https://beeapi.ai.attacker.test/cli/authorize?user_code=BEE7-K9Q2",
+	})
+	if err == nil || !strings.Contains(err.Error(), "受信任") {
+		t.Fatalf("unexpected verification URL result: %v", err)
+	}
+}
+
+func TestUnavailableDeviceAuthorizationShowsLoginPageWithoutClaimingItCanApprove(t *testing.T) {
+	previousTransport := http.DefaultTransport
+	http.DefaultTransport = appRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusNotFound,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"code":404,"message":"not found"}`)),
+			Request:    request,
+		}, nil
+	})
+	t.Cleanup(func() { http.DefaultTransport = previousTransport })
+
+	input := strings.NewReader("1\nn\n")
+	var output bytes.Buffer
+	r := &runner{
+		ctx:    context.Background(),
+		in:     input,
+		reader: bufio.NewReader(input),
+		out:    &output,
+		errOut: &output,
+	}
+	_, err := r.authorize("https://beeapi.dev", false)
+	if err == nil || !strings.Contains(err.Error(), "网站授权未完成") {
+		t.Fatalf("unexpected unavailable authorization result: %v", err)
+	}
+	text := output.String()
+	for _, want := range []string{
+		"BeeAPI 账户登录页: https://beeapi.dev/login",
+		"当前没有能批准本次 CLI 的授权网址",
+		"单独登录账户不会完成 CLI 授权",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("unavailable authorization output is missing %q:\n%s", want, text)
+		}
+	}
+}
+
 func TestParseAgentsIncludesEverySupportedToolAlias(t *testing.T) {
 	agents, err := parseAgents("claude-code,claude_desktop,codex,gemini-cli,grok-build,open-code,open-claw,hermes-agent")
 	if err != nil {
