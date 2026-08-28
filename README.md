@@ -55,10 +55,10 @@ grok                           直接启动 Grok Build
 hermes                         直接启动 Hermes
 beeapi run codex               兼容/排障入口；通常无需使用
 beeapi run claude-desktop      打开 Claude Desktop 的 Code 模式
-beeapi token print --agent codex 仅向 Codex profile 提供其已分配的 Key
+beeapi token print --agent codex 仅向 Codex 的 BeeAPI provider 提供已分配的 Key
 ```
 
-配置完成后，CLI 会为需要运行时注入的工具安装一小段受管 Shell 入口；新开终端即可继续使用工具原本的命令。`beeapi run <工具>` 仍保留为兼容和排障入口。Claude Code、OpenCode 与 OpenClaw 使用各自的原生配置文件，无需命令包装。
+配置完成后可直接使用工具原本的命令，不需要 `beeapi run`、额外 profile 或 Shell 函数。CLI 先完整备份原文件，再只更新默认配置中的 BeeAPI 连接字段；权限、MCP、主题、插件等无关设置保留。`beeapi run <工具>` 仍保留为兼容和排障入口。升级自 v0.2.4 时，旧版受管 Shell 命令区块会在纳入同批备份后自动移除。
 
 详细流程见 [架构说明](docs/architecture.md)。
 
@@ -68,6 +68,6 @@ beeapi token print --agent codex 仅向 Codex profile 提供其已分配的 Key
 - 优选 IP 必须以 BeeAPI 域名作为 SNI，通过 TLS 证书与业务接口双重验证后才能写入 Hosts。
 - CloudflareSpeedTest 只负责 TCP 443 初筛；CLI 会并发复验前 20 个候选的 `/healthz` 实际延迟。全部失败时不会写 Hosts，而是继续使用已探测到的可用域名。
 - Hosts 只写入带 `getbeeapi managed` 标记的区块；写入前备份，可独立移除。
-- 原有工具配置会先做逐文件备份。Codex 使用独立 `beeapi` profile；Grok Build 与 Hermes 使用 GetBeeAPI 专用配置目录，不覆盖各自的官方登录与默认配置。
-- 每个获准导出的账户 Key 都在本机独立存储并可分配给不同工具；Codex 通过 `beeapi token print --agent codex` 按工具读取，不把 Key 写进 profile。
+- 原有工具配置会先做逐文件完整备份；随后只修改 BeeAPI provider、API 地址、所选 Key、模型与必要的鉴权选择字段，不清空权限、MCP、主题或其他 provider。
+- 每个获准导出的账户 Key 都在本机独立存储并可分配给不同工具；Codex 通过 `beeapi token print --agent codex` 按工具读取，不把 Key 明文写进 `config.toml`，现有 `auth.json` 保持不动。
 - 凭据优先进入系统钥匙串；不可用时退回相互隔离、权限为 `0600` 的本地文件。

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -32,17 +33,12 @@ type Options struct {
 	Models     map[string]string
 	Agents     []string
 	BinaryPath string
-	// DirectLaunch installs managed shell functions for adapters that need
-	// runtime credentials or an isolated profile. The original executables and
-	// their native configuration remain untouched.
-	DirectLaunch bool
 }
 
 type Result struct {
-	BackupID     string
-	Files        []string
-	Hints        []string
-	ShellProfile string
+	BackupID string
+	Files    []string
+	Hints    []string
 }
 
 func Apply(store *state.Store, options Options) (Result, error) {
@@ -59,11 +55,14 @@ func Apply(store *state.Store, options Options) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	shared := map[string]struct{ key, model string }{}
 	home, err := targetHome()
 	if err != nil {
 		return Result{}, err
 	}
+
+	// Claude Code and Claude Desktop deliberately share ~/.claude/settings.json.
+	// Refuse ambiguous assignments instead of allowing the last writer to win.
+	shared := map[string]struct{ key, model string }{}
 	for _, agent := range agents {
 		key := apiKeyForAgent(options, agent)
 		model := modelForAgent(options, agent)
@@ -79,78 +78,64 @@ func Apply(store *state.Store, options Options) (Result, error) {
 		}
 		shared[path] = struct{ key, model string }{key: key, model: model}
 	}
-	paths := targetPaths(home, agents)
-	var integration shellIntegration
-	if options.DirectLaunch {
-		integration, err = prepareShellIntegration(store, home)
-		if err != nil {
-			return Result{}, fmt.Errorf("准备直接启动入口: %w", err)
-		}
-		paths = append(paths, integration.CommandsPath)
+
+	legacyProfiles, err := legacyShellProfiles(home)
+	if err != nil {
+		return Result{}, fmt.Errorf("检查旧版 Shell 启动入口: %w", err)
 	}
+	paths := append(targetPaths(home, agents), legacyProfiles...)
 	backup, err := store.CreateBackup(paths)
 	if err != nil {
 		return Result{}, fmt.Errorf("创建配置备份: %w", err)
 	}
+
 	result := Result{BackupID: backup.ID}
 	written := map[string]bool{}
 	for _, agent := range agents {
-		path := pathForAgent(home, agent)
-		if written[path] {
-			appendHint(&result, agent, options.DirectLaunch)
+		primaryPath := pathForAgent(home, agent)
+		if written[primaryPath] {
+			appendHint(&result, agent)
 			continue
 		}
-		if err := writeAgent(path, agent, options); err != nil {
+		files, writeErr := writeAgent(home, agent, options)
+		if writeErr != nil {
 			_, _ = store.Rollback(backup.ID)
-			return Result{}, fmt.Errorf("写入 %s 配置失败（已自动回滚）: %w", agent, err)
+			return Result{}, fmt.Errorf("写入 %s 配置失败（已自动回滚）: %w", agent, writeErr)
 		}
-		written[path] = true
-		result.Files = append(result.Files, path)
-		appendHint(&result, agent, options.DirectLaunch)
+		written[primaryPath] = true
+		result.Files = appendUnique(result.Files, files...)
+		appendHint(&result, agent)
 	}
-	if options.DirectLaunch {
-		if err := installDirectLaunch(integration, agents); err != nil {
-			_, _ = store.Rollback(backup.ID)
-			return Result{}, fmt.Errorf("安装直接启动入口失败（已自动回滚工具配置）: %w", err)
-		}
-		result.Files = append(result.Files, integration.CommandsPath)
-		if len(directLaunchAgents(agents)) > 0 {
-			result.ShellProfile = integration.ProfilePath
-			result.Hints = append(result.Hints, fmt.Sprintf("直接启动命令已写入 %s；新终端生效", integration.ProfilePath))
-			result.Hints = append(result.Hints, "当前终端立即启用: "+shellReloadCommand(integration))
-		}
+	if err := cleanupLegacyShellProfiles(legacyProfiles); err != nil {
+		_, _ = store.Rollback(backup.ID)
+		return Result{}, fmt.Errorf("移除旧版 Shell 启动入口失败（已自动回滚）: %w", err)
 	}
+	if len(legacyProfiles) > 0 {
+		result.Files = appendUnique(result.Files, legacyProfiles...)
+		result.Hints = append(result.Hints, "旧版 Shell 命令注入已移除；重新打开终端后生效")
+	}
+	result.Hints = append(result.Hints, "仅更新 BeeAPI 连接字段；原配置已完整备份，可用 beeapi rollback "+backup.ID+" 恢复")
 	return result, nil
 }
 
-func appendHint(result *Result, agent string, directLaunch bool) {
+func appendHint(result *Result, agent string) {
 	switch agent {
+	case "claude":
+		result.Hints = append(result.Hints, "Claude Code: claude")
 	case "claude-desktop":
-		result.Hints = append(result.Hints, "Claude Desktop: 打开 Code 标签页（与 Claude Code 共享配置）")
+		result.Hints = append(result.Hints, "Claude Desktop: 直接打开 Code 标签页")
 	case "codex":
-		if directLaunch {
-			result.Hints = append(result.Hints, "Codex: codex")
-		} else {
-			result.Hints = append(result.Hints, "Codex: codex --profile beeapi（或 beeapi run codex）")
-		}
+		result.Hints = append(result.Hints, "Codex: codex")
 	case "gemini":
-		if directLaunch {
-			result.Hints = append(result.Hints, "Gemini CLI: gemini")
-		} else {
-			result.Hints = append(result.Hints, "Gemini CLI: beeapi run gemini")
-		}
+		result.Hints = append(result.Hints, "Gemini CLI: gemini")
 	case "grok":
-		if directLaunch {
-			result.Hints = append(result.Hints, "Grok Build: grok")
-		} else {
-			result.Hints = append(result.Hints, "Grok Build: beeapi run grok")
-		}
+		result.Hints = append(result.Hints, "Grok Build: grok")
+	case "opencode":
+		result.Hints = append(result.Hints, "OpenCode: opencode")
+	case "openclaw":
+		result.Hints = append(result.Hints, "OpenClaw: openclaw")
 	case "hermes":
-		if directLaunch {
-			result.Hints = append(result.Hints, "Hermes: hermes")
-		} else {
-			result.Hints = append(result.Hints, "Hermes: beeapi run hermes")
-		}
+		result.Hints = append(result.Hints, "Hermes: hermes")
 	}
 }
 
@@ -196,44 +181,76 @@ func targetHome() (string, error) {
 }
 
 func targetPaths(home string, agents []string) []string {
-	paths := make([]string, 0, len(agents))
+	var paths []string
 	for _, agent := range agents {
-		paths = append(paths, pathForAgent(home, agent))
+		paths = appendUnique(paths, pathsForAgent(home, agent)...)
 	}
 	sort.Strings(paths)
 	return paths
 }
 
-func pathForAgent(home, agent string) string {
+func appendUnique(values []string, additions ...string) []string {
+	seen := make(map[string]bool, len(values)+len(additions))
+	for _, value := range values {
+		seen[filepath.Clean(value)] = true
+	}
+	for _, value := range additions {
+		clean := filepath.Clean(value)
+		if value == "" || seen[clean] {
+			continue
+		}
+		seen[clean] = true
+		values = append(values, clean)
+	}
+	return values
+}
+
+func hermesDir(home string) string {
+	if runtime.GOOS == "windows" {
+		if localAppData := strings.TrimSpace(os.Getenv("LOCALAPPDATA")); localAppData != "" {
+			return filepath.Join(localAppData, "hermes")
+		}
+		return filepath.Join(home, "AppData", "Local", "hermes")
+	}
+	return filepath.Join(home, ".hermes")
+}
+
+func pathsForAgent(home, agent string) []string {
 	switch agent {
-	case "claude":
-		return filepath.Join(home, ".claude", "settings.json")
-	case "claude-desktop":
-		// Claude Desktop Code sessions and Claude Code share this settings file.
-		return filepath.Join(home, ".claude", "settings.json")
+	case "claude", "claude-desktop":
+		return []string{filepath.Join(home, ".claude", "settings.json")}
 	case "codex":
-		return filepath.Join(home, ".codex", "beeapi.config.toml")
+		return []string{filepath.Join(home, ".codex", "config.toml")}
 	case "gemini":
-		return filepath.Join(home, ".config", "getbeeapi", "gemini.env")
+		return []string{
+			filepath.Join(home, ".gemini", ".env"),
+			filepath.Join(home, ".gemini", "settings.json"),
+		}
 	case "grok":
-		return filepath.Join(home, ".config", "getbeeapi", "grok", "config.toml")
+		return []string{filepath.Join(home, ".grok", "config.toml")}
 	case "opencode":
-		return filepath.Join(home, ".config", "opencode", "opencode.json")
+		return []string{filepath.Join(home, ".config", "opencode", "opencode.json")}
 	case "openclaw":
-		return filepath.Join(home, ".openclaw", "openclaw.json")
+		return []string{filepath.Join(home, ".openclaw", "openclaw.json")}
 	case "hermes":
-		return filepath.Join(home, ".config", "getbeeapi", "hermes", "config.yaml")
+		dir := hermesDir(home)
+		return []string{filepath.Join(dir, "config.yaml"), filepath.Join(dir, ".env")}
 	default:
-		return filepath.Join(home, ".config", "getbeeapi", agent+".json")
+		return []string{filepath.Join(home, ".config", "getbeeapi", agent+".json")}
 	}
 }
 
-func writeAgent(path, agent string, options Options) error {
+func pathForAgent(home, agent string) string {
+	return pathsForAgent(home, agent)[0]
+}
+
+func writeAgent(home, agent string, options Options) ([]string, error) {
 	model := modelForAgent(options, agent)
 	apiKey := apiKeyForAgent(options, agent)
+	paths := pathsForAgent(home, agent)
 	switch agent {
 	case "claude", "claude-desktop":
-		return mergeJSON(path, map[string]any{
+		err := mergeJSON(paths[0], map[string]any{
 			"env": map[string]any{
 				"ANTHROPIC_AUTH_TOKEN":           apiKey,
 				"ANTHROPIC_BASE_URL":             options.Endpoint + "/anthropic",
@@ -243,48 +260,65 @@ func writeAgent(path, agent string, options Options) error {
 				"ANTHROPIC_DEFAULT_OPUS_MODEL":   model,
 			},
 		})
+		return paths[:1], err
 	case "codex":
 		binary := strings.TrimSpace(options.BinaryPath)
 		if binary == "" {
 			binary = "beeapi"
 		}
-		content := `# Managed by GetBeeAPI. The official ChatGPT login in auth.json is untouched.
-model_provider = "beeapi"
-model = ` + strconv.Quote(model) + `
-
-[model_providers.beeapi]
-name = "BeeAPI"
-base_url = ` + strconv.Quote(options.Endpoint+"/v1") + `
-wire_api = "responses"
-
-[model_providers.beeapi.auth]
-command = ` + strconv.Quote(binary) + `
-args = ["token", "print", "--agent", "codex"]
-refresh_interval_ms = 0
-timeout_ms = 5000
-`
-		return secureWrite(path, []byte(content))
+		err := patchTOMLFile(paths[0],
+			[]tomlFieldPatch{
+				setTOMLField("model_provider", strconv.Quote("beeapi")),
+				setTOMLField("model", strconv.Quote(model)),
+			},
+			[]tomlSectionPatch{
+				{Name: "model_providers.beeapi", Fields: []tomlFieldPatch{
+					setTOMLField("name", strconv.Quote("BeeAPI")),
+					setTOMLField("base_url", strconv.Quote(options.Endpoint+"/v1")),
+					setTOMLField("wire_api", strconv.Quote("responses")),
+					setTOMLField("requires_openai_auth", "false"),
+					removeTOMLField("experimental_bearer_token"),
+					removeTOMLField("env_key"),
+					removeTOMLField("auth"),
+				}},
+				{Name: "model_providers.beeapi.auth", Fields: []tomlFieldPatch{
+					setTOMLField("command", strconv.Quote(binary)),
+					setTOMLField("args", `["token", "print", "--agent", "codex"]`),
+					setTOMLField("refresh_interval_ms", "0"),
+					setTOMLField("timeout_ms", "5000"),
+				}},
+			})
+		return paths[:1], err
 	case "gemini":
-		content := "# Managed by GetBeeAPI; loaded by the managed gemini command\n" +
-			"GOOGLE_GEMINI_BASE_URL=" + shellQuote(options.Endpoint) + "\n" +
-			"GEMINI_API_KEY=" + shellQuote(apiKey) + "\n" +
-			"GEMINI_MODEL=" + shellQuote(model) + "\n"
-		return secureWrite(path, []byte(content))
+		if err := patchEnvFile(paths[0], []envFieldPatch{
+			{Key: "GOOGLE_GEMINI_BASE_URL", Value: options.Endpoint},
+			{Key: "GEMINI_API_KEY", Value: apiKey},
+			{Key: "GEMINI_MODEL", Value: model},
+		}); err != nil {
+			return nil, err
+		}
+		if err := mergeJSON(paths[1], map[string]any{
+			"security": map[string]any{"auth": map[string]any{"selectedType": "gemini-api-key"}},
+		}); err != nil {
+			return nil, err
+		}
+		return paths, nil
 	case "grok":
-		content := `# Managed by GetBeeAPI; loaded by the managed grok command
-[model.beeapi]
-model = ` + strconv.Quote(model) + `
-base_url = ` + strconv.Quote(options.Endpoint+"/v1") + `
-name = ` + strconv.Quote("BeeAPI · "+model) + `
-env_key = "BEEAPI_API_KEY"
-api_backend = "responses"
-
-[models]
-default = "beeapi"
-`
-		return secureWrite(path, []byte(content))
+		err := patchTOMLFile(paths[0], nil, []tomlSectionPatch{
+			{Name: "model.beeapi", Fields: []tomlFieldPatch{
+				setTOMLField("model", strconv.Quote(model)),
+				setTOMLField("base_url", strconv.Quote(options.Endpoint+"/v1")),
+				setTOMLField("name", strconv.Quote("BeeAPI · "+model)),
+				setTOMLField("api_key", strconv.Quote(apiKey)),
+				removeTOMLField("env_key"),
+				removeTOMLField("auth_provider"),
+				setTOMLField("api_backend", strconv.Quote("responses")),
+			}},
+			{Name: "models", Fields: []tomlFieldPatch{setTOMLField("default", strconv.Quote("beeapi"))}},
+		})
+		return paths[:1], err
 	case "opencode":
-		return mergeJSON(path, map[string]any{
+		err := mergeJSON(paths[0], map[string]any{
 			"$schema": "https://opencode.ai/config.json",
 			"model":   "beeapi/" + model,
 			"provider": map[string]any{
@@ -299,8 +333,9 @@ default = "beeapi"
 				},
 			},
 		})
+		return paths[:1], err
 	case "openclaw":
-		return mergeJSON(path, map[string]any{
+		err := mergeJSON(paths[0], map[string]any{
 			"agents": map[string]any{"defaults": map[string]any{"model": map[string]any{"primary": "beeapi/" + model}}},
 			"models": map[string]any{
 				"mode": "merge",
@@ -314,16 +349,25 @@ default = "beeapi"
 				},
 			},
 		})
+		return paths[:1], err
 	case "hermes":
-		content := "# Managed by GetBeeAPI; loaded by the managed hermes command\n" +
-			"model:\n" +
-			"  default: " + strconv.Quote(model) + "\n" +
-			"  provider: custom\n" +
-			"  base_url: " + strconv.Quote(options.Endpoint+"/v1") + "\n" +
-			"  api_mode: chat_completions\n"
-		return secureWrite(path, []byte(content))
+		if err := patchYAMLMappingFile(paths[0], "model", []yamlFieldPatch{
+			{Key: "default", Value: strconv.Quote(model)},
+			{Key: "provider", Value: strconv.Quote("custom")},
+			{Key: "base_url", Value: strconv.Quote(options.Endpoint + "/v1")},
+		}); err != nil {
+			return nil, err
+		}
+		if err := patchEnvFile(paths[1], []envFieldPatch{
+			{Key: "OPENAI_API_KEY", Value: apiKey},
+			{Key: "OPENAI_BASE_URL", Value: options.Endpoint + "/v1"},
+			{Key: "HERMES_INFERENCE_MODEL", Value: model},
+		}); err != nil {
+			return nil, err
+		}
+		return paths, nil
 	default:
-		return fmt.Errorf("未知智能体: %s", agent)
+		return nil, fmt.Errorf("未知智能体: %s", agent)
 	}
 }
 
@@ -381,8 +425,4 @@ func deepMerge(dst, src map[string]any) {
 		}
 		dst[key] = value
 	}
-}
-
-func shellQuote(value string) string {
-	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
 }

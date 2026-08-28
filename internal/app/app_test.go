@@ -7,7 +7,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -177,9 +176,7 @@ func TestParseAgentsIncludesEverySupportedToolAlias(t *testing.T) {
 	}
 }
 
-func TestWrapperEnvironmentsKeepGrokAndHermesSecretsOutOfProfiles(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+func TestRunEnvironmentsDoNotOverrideNativeConfigHomes(t *testing.T) {
 	cfg := state.Config{
 		Endpoint: "https://beeapi.dev",
 		Models: map[string]string{
@@ -189,17 +186,18 @@ func TestWrapperEnvironmentsKeepGrokAndHermesSecretsOutOfProfiles(t *testing.T) 
 	}
 
 	grok := agentEnvironment("grok", cfg, "sk-test")
-	wantGrokHome := "GROK_HOME=" + filepath.Join(home, ".config", "getbeeapi", "grok")
-	if !containsString(grok, wantGrokHome) || !containsString(grok, "BEEAPI_API_KEY=sk-test") {
+	if !containsString(grok, "BEEAPI_API_KEY=sk-test") || containsPrefix(grok, "GROK_HOME=") {
 		t.Fatalf("unexpected Grok environment: %#v", grok)
 	}
 
 	hermes := agentEnvironment("hermes", cfg, "sk-test")
-	wantHermesHome := "HERMES_HOME=" + filepath.Join(home, ".config", "getbeeapi", "hermes")
-	for _, want := range []string{wantHermesHome, "OPENAI_API_KEY=sk-test", "HERMES_INFERENCE_MODEL=hermes-4"} {
+	for _, want := range []string{"OPENAI_API_KEY=sk-test", "OPENAI_BASE_URL=https://beeapi.dev/v1", "HERMES_INFERENCE_MODEL=hermes-4"} {
 		if !containsString(hermes, want) {
 			t.Fatalf("Hermes environment missing %q: %#v", want, hermes)
 		}
+	}
+	if containsPrefix(hermes, "HERMES_HOME=") {
+		t.Fatalf("Hermes native home was unexpectedly overridden: %#v", hermes)
 	}
 }
 
@@ -720,6 +718,15 @@ func TestCredentialClaimRetriesOneInterruptedResponse(t *testing.T) {
 func containsString(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func containsPrefix(values []string, prefix string) bool {
+	for _, value := range values {
+		if strings.HasPrefix(value, prefix) {
 			return true
 		}
 	}

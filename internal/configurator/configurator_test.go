@@ -24,6 +24,14 @@ func TestApplyMergesBacksUpAndRollsBack(t *testing.T) {
 	if err := os.WriteFile(claudePath, original, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	codexPath := filepath.Join(home, ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(codexPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	codexOriginal := []byte("# user comment\napproval_policy = \"on-request\"\n\n[mcp_servers.docs]\ncommand = \"docs-server\"\n")
+	if err := os.WriteFile(codexPath, codexOriginal, 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	result, err := Apply(store, Options{
 		Endpoint:   "https://beeapi.dev/",
@@ -51,7 +59,6 @@ func TestApplyMergesBacksUpAndRollsBack(t *testing.T) {
 		t.Fatalf("Claude settings permissions = %v, %v; want 0600", info, err)
 	}
 
-	codexPath := filepath.Join(home, ".codex", "beeapi.config.toml")
 	codex, err := os.ReadFile(codexPath)
 	if err != nil {
 		t.Fatal(err)
@@ -62,6 +69,11 @@ func TestApplyMergesBacksUpAndRollsBack(t *testing.T) {
 	for _, want := range []string{"wire_api = \"responses\"", "command = \"/usr/local/bin/beeapi\"", "args = [\"token\", \"print\", \"--agent\", \"codex\"]"} {
 		if !strings.Contains(string(codex), want) {
 			t.Fatalf("Codex profile is missing %q:\n%s", want, codex)
+		}
+	}
+	for _, want := range []string{"# user comment", `approval_policy = "on-request"`, "[mcp_servers.docs]", `command = "docs-server"`} {
+		if !strings.Contains(string(codex), want) {
+			t.Fatalf("Codex unrelated configuration was not preserved (%q):\n%s", want, codex)
 		}
 	}
 	for _, unsupported := range []string{"disable_response_storage", "model_reasoning_effort"} {
@@ -80,12 +92,16 @@ func TestApplyMergesBacksUpAndRollsBack(t *testing.T) {
 	if string(restored) != string(original) {
 		t.Fatalf("Claude settings did not roll back exactly:\n%s", restored)
 	}
-	if _, err := os.Stat(codexPath); !os.IsNotExist(err) {
-		t.Fatalf("new Codex profile was not removed during rollback: %v", err)
+	restoredCodex, err := os.ReadFile(codexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(restoredCodex) != string(codexOriginal) {
+		t.Fatalf("Codex config did not roll back exactly:\n%s", restoredCodex)
 	}
 }
 
-func TestApplySupportsDesktopGrokAndHermesWithoutWritingKeysToProfiles(t *testing.T) {
+func TestApplySupportsDesktopGrokAndHermesUsingNativeConfigs(t *testing.T) {
 	root := t.TempDir()
 	home := filepath.Join(root, "home")
 	store := &state.Store{Dir: filepath.Join(root, "state")}
@@ -113,8 +129,8 @@ func TestApplySupportsDesktopGrokAndHermesWithoutWritingKeysToProfiles(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Files) != 3 {
-		t.Fatalf("configured files = %d, want 3: %#v", len(result.Files), result.Files)
+	if len(result.Files) != 4 {
+		t.Fatalf("configured files = %d, want 4: %#v", len(result.Files), result.Files)
 	}
 
 	claude, err := os.ReadFile(claudePath)
@@ -127,32 +143,39 @@ func TestApplySupportsDesktopGrokAndHermesWithoutWritingKeysToProfiles(t *testin
 		}
 	}
 
-	grokPath := filepath.Join(home, ".config", "getbeeapi", "grok", "config.toml")
+	grokPath := filepath.Join(home, ".grok", "config.toml")
 	grok, err := os.ReadFile(grokPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"[model.beeapi]", `base_url = "https://beeapi.dev/v1"`, `env_key = "BEEAPI_API_KEY"`, `default = "beeapi"`} {
+	for _, want := range []string{"[model.beeapi]", `base_url = "https://beeapi.dev/v1"`, `api_key = "sk-secret-value"`, `default = "beeapi"`} {
 		if !strings.Contains(string(grok), want) {
 			t.Fatalf("Grok profile missing %q:\n%s", want, grok)
 		}
 	}
-	if strings.Contains(string(grok), "sk-secret-value") {
-		t.Fatal("Grok profile contains the API key")
-	}
 
-	hermesPath := filepath.Join(home, ".config", "getbeeapi", "hermes", "config.yaml")
+	hermesPath := filepath.Join(home, ".hermes", "config.yaml")
 	hermes, err := os.ReadFile(hermesPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{`default: "hermes-4"`, "provider: custom", `base_url: "https://beeapi.dev/v1"`, "api_mode: chat_completions"} {
+	for _, want := range []string{`default: "hermes-4"`, `provider: "custom"`, `base_url: "https://beeapi.dev/v1"`} {
 		if !strings.Contains(string(hermes), want) {
 			t.Fatalf("Hermes profile missing %q:\n%s", want, hermes)
 		}
 	}
 	if strings.Contains(string(hermes), "sk-secret-value") {
-		t.Fatal("Hermes profile contains the API key")
+		t.Fatal("Hermes config.yaml contains the API key")
+	}
+	hermesEnvPath := filepath.Join(home, ".hermes", ".env")
+	hermesEnv, err := os.ReadFile(hermesEnvPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`OPENAI_API_KEY="sk-secret-value"`, `OPENAI_BASE_URL="https://beeapi.dev/v1"`, `HERMES_INFERENCE_MODEL="hermes-4"`} {
+		if !strings.Contains(string(hermesEnv), want) {
+			t.Fatalf("Hermes .env missing %q:\n%s", want, hermesEnv)
+		}
 	}
 
 	if _, err := store.Rollback(result.BackupID); err != nil {
@@ -165,7 +188,7 @@ func TestApplySupportsDesktopGrokAndHermesWithoutWritingKeysToProfiles(t *testin
 	if string(restored) != string(original) {
 		t.Fatalf("Claude Desktop settings did not roll back exactly:\n%s", restored)
 	}
-	for _, path := range []string{grokPath, hermesPath} {
+	for _, path := range []string{grokPath, hermesPath, hermesEnvPath} {
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
 			t.Fatalf("new profile was not removed during rollback: %s: %v", path, err)
 		}
@@ -193,7 +216,7 @@ func TestApplyDeduplicatesClaudeSharedSettings(t *testing.T) {
 	if len(result.Files) != 1 {
 		t.Fatalf("shared Claude configuration should be written once, got %#v", result.Files)
 	}
-	if len(result.Hints) != 1 || !strings.Contains(result.Hints[0], "Claude Desktop") {
+	if !containsSubstring(result.Hints, "Claude Desktop") || !containsSubstring(result.Hints, "Claude Code") {
 		t.Fatalf("desktop hint missing: %#v", result.Hints)
 	}
 }
@@ -219,23 +242,27 @@ func TestApplyWritesEverySupportedToolAdapter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Claude Code and Claude Desktop intentionally share one settings file.
-	if len(result.Files) != len(SupportedAgents)-1 {
-		t.Fatalf("configured files = %d, want %d: %#v", len(result.Files), len(SupportedAgents)-1, result.Files)
+	// Claude Code and Claude Desktop share one file; Gemini and Hermes each
+	// need one additional native secrets/settings file.
+	if len(result.Files) != len(SupportedAgents)+1 {
+		t.Fatalf("configured files = %d, want %d: %#v", len(result.Files), len(SupportedAgents)+1, result.Files)
 	}
 
 	checks := map[string][]string{
 		filepath.Join(home, ".claude", "settings.json"): {
 			"ANTHROPIC_BASE_URL", "https://beeapi.ai/anthropic", "sk-all-tools", "bee-model-claude",
 		},
-		filepath.Join(home, ".codex", "beeapi.config.toml"): {
+		filepath.Join(home, ".codex", "config.toml"): {
 			`model_provider = "beeapi"`, `base_url = "https://beeapi.ai/v1"`, `command = "/opt/getbeeapi/beeapi"`,
 		},
-		filepath.Join(home, ".config", "getbeeapi", "gemini.env"): {
-			"GOOGLE_GEMINI_BASE_URL='https://beeapi.ai'", "GEMINI_API_KEY='sk-all-tools'", "bee-model-gemini",
+		filepath.Join(home, ".gemini", ".env"): {
+			`GOOGLE_GEMINI_BASE_URL="https://beeapi.ai"`, `GEMINI_API_KEY="sk-all-tools"`, "bee-model-gemini",
 		},
-		filepath.Join(home, ".config", "getbeeapi", "grok", "config.toml"): {
-			"[model.beeapi]", `env_key = "BEEAPI_API_KEY"`, "bee-model-grok",
+		filepath.Join(home, ".gemini", "settings.json"): {
+			`"selectedType": "gemini-api-key"`,
+		},
+		filepath.Join(home, ".grok", "config.toml"): {
+			"[model.beeapi]", `api_key = "sk-all-tools"`, "bee-model-grok",
 		},
 		filepath.Join(home, ".config", "opencode", "opencode.json"): {
 			`"beeapi"`, `"baseURL": "https://beeapi.ai/v1"`, `"apiKey": "sk-all-tools"`, "bee-model-opencode",
@@ -243,8 +270,11 @@ func TestApplyWritesEverySupportedToolAdapter(t *testing.T) {
 		filepath.Join(home, ".openclaw", "openclaw.json"): {
 			`"baseUrl": "https://beeapi.ai/v1"`, `"apiKey": "sk-all-tools"`, `"api": "openai-responses"`, "bee-model-openclaw",
 		},
-		filepath.Join(home, ".config", "getbeeapi", "hermes", "config.yaml"): {
-			"provider: custom", `base_url: "https://beeapi.ai/v1"`, "bee-model-hermes",
+		filepath.Join(home, ".hermes", "config.yaml"): {
+			`provider: "custom"`, `base_url: "https://beeapi.ai/v1"`, "bee-model-hermes",
+		},
+		filepath.Join(home, ".hermes", ".env"): {
+			`OPENAI_API_KEY="sk-all-tools"`, `OPENAI_BASE_URL="https://beeapi.ai/v1"`, "bee-model-hermes",
 		},
 	}
 	for path, fragments := range checks {
@@ -259,17 +289,13 @@ func TestApplyWritesEverySupportedToolAdapter(t *testing.T) {
 		}
 	}
 
-	for _, path := range []string{
-		filepath.Join(home, ".codex", "beeapi.config.toml"),
-		filepath.Join(home, ".config", "getbeeapi", "grok", "config.toml"),
-		filepath.Join(home, ".config", "getbeeapi", "hermes", "config.yaml"),
-	} {
+	for _, path := range []string{filepath.Join(home, ".codex", "config.toml"), filepath.Join(home, ".hermes", "config.yaml")} {
 		content, readErr := os.ReadFile(path)
 		if readErr != nil {
 			t.Fatal(readErr)
 		}
 		if strings.Contains(string(content), "sk-all-tools") {
-			t.Errorf("wrapper-backed adapter leaked the API Key into %s", path)
+			t.Errorf("command/env-backed adapter leaked the API Key into %s", path)
 		}
 	}
 }

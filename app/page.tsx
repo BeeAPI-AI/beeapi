@@ -28,12 +28,12 @@ const phases = [
 const agents = [
   { name: "Claude Code", key: "CLAUDE", kind: "编码 CLI", icon: "/tool-icons/claude.svg", detail: "合并现有 settings.json，保留权限与工具设置。" },
   { name: "Claude Desktop", key: "DESKTOP", kind: "Code 模式", icon: "/tool-icons/claude.svg", detail: "与 Claude Code 共享配置，并可从 CLI 直接打开 Code。" },
-  { name: "Codex", key: "CODEX", kind: "编码 CLI", icon: "/tool-icons/codex.svg", detail: "建立独立 beeapi profile，不改动 ChatGPT 登录。" },
-  { name: "Gemini CLI", key: "GEMINI", kind: "编码 CLI", icon: "/tool-icons/gemini.svg", detail: "通过受保护运行环境注入入口、Key 与模型。" },
-  { name: "Grok Build", key: "GROK", kind: "编码 CLI", icon: "/tool-icons/grok.svg", detail: "使用专用 GROK_HOME 与官方 custom model 配置。" },
+  { name: "Codex", key: "CODEX", kind: "编码 CLI", icon: "/tool-icons/codex.svg", detail: "只更新默认配置的 BeeAPI provider，不改 ChatGPT 登录与 MCP。" },
+  { name: "Gemini CLI", key: "GEMINI", kind: "编码 CLI", icon: "/tool-icons/gemini.svg", detail: "只更新原生 .env 连接变量与鉴权选择。" },
+  { name: "Grok Build", key: "GROK", kind: "编码 CLI", icon: "/tool-icons/grok.svg", detail: "在默认配置中增加 BeeAPI model，保留 UI 与 MCP。" },
   { name: "OpenCode", key: "OPENCODE", kind: "编码 CLI", icon: "/tool-icons/opencode.svg", detail: "深度合并 BeeAPI provider 与默认模型。" },
   { name: "OpenClaw", key: "OPENCLAW", kind: "个人智能体", icon: "/tool-icons/openclaw.svg", detail: "同步 provider、模型列表与主模型选择。" },
-  { name: "Hermes", key: "HERMES", kind: "智能体 CLI", icon: "/tool-icons/hermes.svg", detail: "使用专用 HERMES_HOME 与 custom provider 启动。" },
+  { name: "Hermes", key: "HERMES", kind: "智能体 CLI", icon: "/tool-icons/hermes.svg", detail: "局部更新 model 与原生 .env，保留 agent、MCP 等设置。" },
 ];
 
 const endpoints = [
@@ -54,8 +54,8 @@ const faqs = [
     answer: "正常入口可访问时不会启动优选。只有需要修复或你主动选择时，才先按 TCP 443 延迟与丢包筛选 Cloudflare IP，再用 BeeAPI 域名的 TLS 与 /healthz 复验前排候选；全部失败会自动回退到已有可用入口。",
   },
   {
-    question: "它会直接覆盖我现有的配置吗？",
-    answer: "不会。写入前会按文件创建同批次备份，JSON 配置采用深度合并；任一工具写入失败会自动回滚，也可以运行 beeapi rollback latest。",
+    question: "它会弄乱我现有的配置吗？",
+    answer: "不会。它先完整备份原文件，再只更新 BeeAPI 的 API 地址、Key、模型、provider 与必要鉴权字段；权限、MCP、主题、插件和其他 provider 保留。任一步失败会自动回滚，也可以运行 beeapi rollback latest。",
   },
   {
     question: "线路优选会直接修改 Hosts 吗？",

@@ -224,7 +224,7 @@ func (r *runner) configureInteractive() error {
 	}
 	result, err := configurator.Apply(r.store, configurator.Options{
 		Endpoint: cfg.Endpoint, APIKeys: apiKeys, Models: selectedModels,
-		Agents: agents, BinaryPath: binaryPath, DirectLaunch: true,
+		Agents: agents, BinaryPath: binaryPath,
 	})
 	if err != nil {
 		return err
@@ -232,6 +232,7 @@ func (r *runner) configureInteractive() error {
 	cfg.Agents, cfg.Models, cfg.AgentCredentials, cfg.BinaryPath = agents, selectedModels, assignments, binaryPath
 	setDefaultModel(&cfg, agents, selectedModels)
 	if err := r.store.SaveConfig(cfg); err != nil {
+		_, _ = r.store.Rollback(result.BackupID)
 		return err
 	}
 	fmt.Fprintf(r.out, "\n配置完成 · %s · 备份 %s\n", friendlyAgentList(agents), result.BackupID)
@@ -300,7 +301,7 @@ func (r *runner) reconnect() error {
 		}
 		result, applyErr := configurator.Apply(r.store, configurator.Options{
 			Endpoint: endpoint, APIKeys: apiKeys, Models: selectedModels,
-			Agents: cfg.Agents, BinaryPath: cfg.BinaryPath, DirectLaunch: true,
+			Agents: cfg.Agents, BinaryPath: cfg.BinaryPath,
 		})
 		if applyErr != nil {
 			return applyErr

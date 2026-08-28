@@ -165,7 +165,7 @@ CLI 验证每个返回项都有非空 `credential_id` 与 `api_key`，对 `skipp
 - 每个获准导出的账户 Key 拥有独立的本地 ID 与安全存储槽；opaque ID 不直接用作文件名或钥匙串账户名。
 - Linux 优先 Secret Service，macOS 优先 Keychain，Windows 优先当前用户 DPAPI；回退文件权限为 `0600`。
 - 用户可为不同工具选择不同凭据和模型。若当前或刚输入的 Key 没有目标工具所需的兼容模型，CLI 会说明原因并列出其他兼容 Key 供重新选择；只有一个兼容 Key 时自动选用，所有 Key 都不兼容时才停止。Claude Code 与 Claude Desktop Code 共享设置，因此必须使用同一凭据与模型。
-- Codex profile 使用 `beeapi token print --agent codex` 按工具读取已分配的凭据，不把 Key 写进 profile。
+- Codex 默认配置中的 BeeAPI provider 使用 `beeapi token print --agent codex` 按工具读取已分配的凭据，不把 Key 明文写进 `config.toml`，也不修改 `auth.json`。
 - 手动粘贴模式只产生一个本地凭据。
 - 设备授权撤销只能阻止再次领取，不能让已经导出的共享 Key 自动失效；需要停用原 Key 才能使其失效。
 

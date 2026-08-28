@@ -17,33 +17,6 @@ const (
 	directCommandsEnd   = "# <<< getbeeapi commands <<<"
 )
 
-type shellIntegration struct {
-	Kind         string
-	ProfilePath  string
-	CommandsPath string
-}
-
-func prepareShellIntegration(store *state.Store, home string) (shellIntegration, error) {
-	if store == nil {
-		return shellIntegration{}, errors.New("缺少本地状态目录")
-	}
-	kind, profilePath, err := currentShellProfile(home)
-	if err != nil {
-		return shellIntegration{}, err
-	}
-	extension := ".sh"
-	if kind == "fish" {
-		extension = ".fish"
-	} else if kind == "powershell" {
-		extension = ".ps1"
-	}
-	return shellIntegration{
-		Kind:         kind,
-		ProfilePath:  profilePath,
-		CommandsPath: filepath.Join(store.Dir, "shell", "commands"+extension),
-	}, nil
-}
-
 func currentShellProfile(home string) (string, string, error) {
 	if runtime.GOOS == "windows" {
 		profile := strings.TrimSpace(os.Getenv("GETBEE_POWERSHELL_PROFILE"))
@@ -106,157 +79,93 @@ func resolveShellProfile(path string) string {
 	return resolved
 }
 
-func directLaunchAgents(agents []string) []string {
-	wrappers := map[string]bool{
-		"codex": true, "gemini": true, "grok": true, "hermes": true,
+// legacyShellProfiles locates only the exact shell startup files that an older
+// GetBeeAPI release could have modified. Native tool configuration no longer
+// needs these wrappers.
+func legacyShellProfiles(home string) ([]string, error) {
+	candidates := []string{
+		filepath.Join(home, ".zshrc"),
+		filepath.Join(home, ".bashrc"),
+		filepath.Join(home, ".bash_profile"),
+		filepath.Join(home, ".profile"),
+		filepath.Join(home, ".config", "fish", "conf.d", "getbeeapi.fish"),
 	}
+	if runtime.GOOS == "windows" {
+		candidates = append(candidates,
+			filepath.Join(home, "Documents", "PowerShell", "profile.ps1"),
+			filepath.Join(home, "Documents", "WindowsPowerShell", "profile.ps1"),
+		)
+	}
+	if _, current, err := currentShellProfile(home); err == nil && current != "" {
+		candidates = append(candidates, current)
+	}
+
+	var result []string
 	seen := map[string]bool{}
-	result := make([]string, 0, len(agents))
-	for _, agent := range agents {
-		if wrappers[agent] && !seen[agent] {
-			seen[agent] = true
-			result = append(result, agent)
+	for _, candidate := range candidates {
+		path := resolveShellProfile(candidate)
+		if seen[path] {
+			continue
 		}
+		seen[path] = true
+		content, err := os.ReadFile(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		startCount := strings.Count(string(content), directCommandsStart)
+		endCount := strings.Count(string(content), directCommandsEnd)
+		if startCount == 0 && endCount == 0 {
+			continue
+		}
+		if startCount != 1 || endCount != 1 {
+			return nil, fmt.Errorf("%s 中的旧版 GetBeeAPI 管理区块不完整或重复", path)
+		}
+		result = append(result, path)
 	}
-	return result
+	return result, nil
 }
 
-func installDirectLaunch(integration shellIntegration, agents []string) error {
-	commands := renderDirectCommands(integration.Kind, agents)
-	if err := state.AtomicWrite(integration.CommandsPath, []byte(commands), 0o600); err != nil {
-		return fmt.Errorf("写入直接启动命令: %w", err)
-	}
-	if len(directLaunchAgents(agents)) == 0 {
-		return nil
-	}
-	hook := renderShellHook(integration.Kind, integration.CommandsPath)
-	if err := updateManagedShellBlock(integration.ProfilePath, hook); err != nil {
-		return fmt.Errorf("更新 Shell 启动文件 %s: %w", integration.ProfilePath, err)
+func cleanupLegacyShellProfiles(paths []string) error {
+	for _, path := range paths {
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		text := string(content)
+		newline := detectedNewline(text)
+		lines, finalNewline := splitTextLines(text)
+		inside := false
+		removed := false
+		result := make([]string, 0, len(lines))
+		for _, line := range lines {
+			switch strings.TrimSpace(line) {
+			case directCommandsStart:
+				inside = true
+				removed = true
+				continue
+			case directCommandsEnd:
+				inside = false
+				continue
+			}
+			if !inside {
+				result = append(result, line)
+			}
+		}
+		if inside {
+			return fmt.Errorf("%s 中的旧版 GetBeeAPI 管理区块缺少结束标记", path)
+		}
+		if !removed {
+			continue
+		}
+		for len(result) >= 2 && strings.TrimSpace(result[len(result)-1]) == "" && strings.TrimSpace(result[len(result)-2]) == "" {
+			result = result[:len(result)-1]
+		}
+		if err := state.AtomicWrite(path, []byte(joinTextLines(result, newline, finalNewline && len(result) > 0)), 0o600); err != nil {
+			return err
+		}
 	}
 	return nil
-}
-
-func renderDirectCommands(kind string, agents []string) string {
-	wrappers := directLaunchAgents(agents)
-	newline := "\n"
-	if kind == "powershell" {
-		newline = "\r\n"
-	}
-	lines := []string{"# Managed by GetBeeAPI. Run `beeapi configure` to update these commands."}
-	for _, agent := range wrappers {
-		command := commandForAgent(agent)
-		switch kind {
-		case "fish":
-			lines = append(lines,
-				"function "+command+" --description 'Run "+agentDisplayName(agent)+" with BeeAPI'",
-				"    command beeapi run "+agent+" $argv",
-				"end",
-			)
-		case "powershell":
-			lines = append(lines,
-				"function global:"+command+" {",
-				"    & beeapi run "+agent+" @args",
-				"}",
-			)
-		default:
-			lines = append(lines,
-				command+"() {",
-				"  command beeapi run "+agent+" \"$@\"",
-				"}",
-			)
-		}
-	}
-	return strings.Join(lines, newline) + newline
-}
-
-func renderShellHook(kind, commandsPath string) string {
-	var lines []string
-	switch kind {
-	case "fish":
-		quoted := shellQuote(commandsPath)
-		lines = []string{
-			directCommandsStart,
-			"if test -r " + quoted,
-			"    source " + quoted,
-			"end",
-			directCommandsEnd,
-		}
-	case "powershell":
-		quoted := "'" + strings.ReplaceAll(commandsPath, "'", "''") + "'"
-		lines = []string{
-			directCommandsStart,
-			"$GetBeeAPICommands = " + quoted,
-			"if (Test-Path -LiteralPath $GetBeeAPICommands) { . $GetBeeAPICommands }",
-			"Remove-Variable GetBeeAPICommands -ErrorAction SilentlyContinue",
-			directCommandsEnd,
-		}
-	default:
-		quoted := shellQuote(commandsPath)
-		lines = []string{
-			directCommandsStart,
-			"if [ -r " + quoted + " ]; then",
-			"  . " + quoted,
-			"fi",
-			directCommandsEnd,
-		}
-	}
-	return strings.Join(lines, "\n")
-}
-
-func shellReloadCommand(integration shellIntegration) string {
-	if integration.Kind == "powershell" {
-		return ". '" + strings.ReplaceAll(integration.ProfilePath, "'", "''") + "'"
-	}
-	if integration.Kind == "fish" {
-		return "source " + shellQuote(integration.ProfilePath)
-	}
-	return ". " + shellQuote(integration.ProfilePath)
-}
-
-func updateManagedShellBlock(path, block string) error {
-	content, err := os.ReadFile(path)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	current := string(content)
-	startCount := strings.Count(current, directCommandsStart)
-	endCount := strings.Count(current, directCommandsEnd)
-	if startCount != endCount || startCount > 1 {
-		return errors.New("发现不完整或重复的 GetBeeAPI 管理区块，请先手动检查该文件")
-	}
-
-	next := current
-	if startCount == 1 {
-		start := strings.Index(current, directCommandsStart)
-		end := strings.Index(current[start:], directCommandsEnd)
-		if end < 0 {
-			return errors.New("GetBeeAPI 管理区块缺少结束标记")
-		}
-		end += start + len(directCommandsEnd)
-		next = current[:start] + block + current[end:]
-	} else {
-		if next != "" && !strings.HasSuffix(next, "\n") {
-			next += "\n"
-		}
-		if next != "" && !strings.HasSuffix(next, "\n\n") {
-			next += "\n"
-		}
-		next += block + "\n"
-	}
-	if next == current {
-		return nil
-	}
-	return state.AtomicWrite(path, []byte(next), 0o600)
-}
-
-func commandForAgent(agent string) string {
-	return map[string]string{
-		"codex": "codex", "gemini": "gemini", "grok": "grok", "hermes": "hermes",
-	}[agent]
-}
-
-func agentDisplayName(agent string) string {
-	return map[string]string{
-		"codex": "Codex", "gemini": "Gemini CLI", "grok": "Grok Build", "hermes": "Hermes",
-	}[agent]
 }

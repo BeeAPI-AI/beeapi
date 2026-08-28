@@ -192,7 +192,7 @@ func (r *runner) setup(args []string) error {
 	binaryPath, _ := os.Executable()
 	result, err := configurator.Apply(r.store, configurator.Options{
 		Endpoint: endpoint, APIKeys: apiKeys, Models: selectedModels,
-		Agents: agents, BinaryPath: binaryPath, DirectLaunch: true,
+		Agents: agents, BinaryPath: binaryPath,
 	})
 	if err != nil {
 		return err
@@ -1363,13 +1363,13 @@ func (r *runner) configure(args []string) error {
 	}
 	result, err := configurator.Apply(r.store, configurator.Options{
 		Endpoint: cfg.Endpoint, APIKeys: apiKeys, Models: models, Agents: agents, BinaryPath: cfg.BinaryPath,
-		DirectLaunch: true,
 	})
 	if err != nil {
 		return err
 	}
 	cfg.Agents, cfg.Models, cfg.AgentCredentials = agents, models, assignments
 	if err := r.store.SaveConfig(cfg); err != nil {
+		_, _ = r.store.Rollback(result.BackupID)
 		return err
 	}
 	fmt.Fprintf(r.out, "已配置 %s；备份编号 %s\n", strings.Join(agents, "、"), result.BackupID)
@@ -1582,9 +1582,6 @@ func (r *runner) runAgent(args []string) error {
 		return fmt.Errorf("%s 尚未分配 BeeAPI 密钥配置，请先运行 beeapi configure", agentLabel(agent))
 	}
 	commandArgs := append([]string(nil), args[1:]...)
-	if agent == "codex" {
-		commandArgs = append([]string{"--profile", "beeapi"}, commandArgs...)
-	}
 	cmd := exec.CommandContext(r.ctx, path, commandArgs...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = r.in, r.out, r.errOut
 	cmd.Env = append(os.Environ(), agentEnvironment(agent, cfg, credential.Secret)...)
@@ -1599,16 +1596,11 @@ func agentEnvironment(agent string, cfg state.Config, secret string) []string {
 	case "gemini":
 		return []string{"GOOGLE_GEMINI_BASE_URL=" + cfg.Endpoint, "GEMINI_API_KEY=" + secret, "GEMINI_MODEL=" + model}
 	case "grok":
-		home, _ := os.UserHomeDir()
-		return []string{
-			"GROK_HOME=" + filepath.Join(home, ".config", "getbeeapi", "grok"),
-			"BEEAPI_API_KEY=" + secret,
-		}
+		return []string{"BEEAPI_API_KEY=" + secret}
 	case "hermes":
-		home, _ := os.UserHomeDir()
 		return []string{
-			"HERMES_HOME=" + filepath.Join(home, ".config", "getbeeapi", "hermes"),
 			"OPENAI_API_KEY=" + secret,
+			"OPENAI_BASE_URL=" + strings.TrimRight(cfg.Endpoint, "/") + "/v1",
 			"HERMES_INFERENCE_MODEL=" + model,
 		}
 	default:
