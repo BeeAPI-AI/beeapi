@@ -1,0 +1,32 @@
+name: installer-smoke
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "public/install.ps1"
+      - ".github/workflows/installer-smoke.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-powershell-51:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install with Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          if ($PSVersionTable.PSVersion.Major -ne 5) {
+            throw "Expected Windows PowerShell 5.1, got $($PSVersionTable.PSVersion)"
+          }
+          $InstallDir = Join-Path $env:RUNNER_TEMP "getbeeapi-bin"
+          & .\public\install.ps1 -InstallDir $InstallDir -NoSetup
+          $InstalledVersion = & (Join-Path $InstallDir "beeapi.exe") version
+          if ($LASTEXITCODE -ne 0 -or $InstalledVersion -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') {
+            throw "Installed CLI did not report a release version: $InstalledVersion"
+          }
+          Write-Host "Installed $InstalledVersion with Windows PowerShell $($PSVersionTable.PSVersion)"

@@ -8,15 +8,32 @@ param(
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
-switch ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()) {
+# Windows PowerShell 5.1 can run on .NET Framework versions where
+# RuntimeInformation.OSArchitecture is unavailable. PROCESSOR_ARCHITEW6432
+# reports the native OS architecture when a 32-bit host runs on 64-bit Windows.
+$Architecture = [string]$env:PROCESSOR_ARCHITEW6432
+if ([string]::IsNullOrWhiteSpace($Architecture)) {
+  $Architecture = [string]$env:PROCESSOR_ARCHITECTURE
+}
+
+switch ($Architecture.ToUpperInvariant()) {
+  "AMD64" { $Arch = "amd64" }
   "X64" { $Arch = "amd64" }
-  "Arm64" { $Arch = "arm64" }
-  default { throw "Unsupported CPU architecture: $($_)" }
+  "ARM64" { $Arch = "arm64" }
+  default { throw "Unsupported CPU architecture: $Architecture" }
+}
+
+# Older Windows PowerShell sessions can still default to TLS 1.0. Keep any
+# protocols already enabled and add TLS 1.2 for Cloudflare and GitHub downloads.
+try {
+  [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+} catch {
+  # PowerShell 7 uses HttpClient and does not require this compatibility path.
 }
 
 $Asset = "beeapi_windows_$Arch.zip"
 if ($env:BEEAPI_DOWNLOAD_BASE) {
-  $Bases = @($env:BEEAPI_DOWNLOAD_BASE.TrimEnd("/"))
+  $Bases = @($env:BEEAPI_DOWNLOAD_BASE.TrimEnd([char]"/"))
 } elseif ($Version -eq "latest") {
   $Bases = @(
     "https://getbeeapi.com/releases/latest/download",

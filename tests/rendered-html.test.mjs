@@ -64,6 +64,10 @@ test("ships matching verified installers", async () => {
   assert.match(powerShell, /Get-FileHash -Algorithm SHA256/);
   assert.match(powerShell, /getbeeapi\.com\/releases\/latest\/download/);
   assert.match(powerShell, /github\.com\/BeeAPI-AI\/beeapi\/releases/);
+  assert.match(powerShell, /PROCESSOR_ARCHITEW6432/);
+  assert.match(powerShell, /PROCESSOR_ARCHITECTURE/);
+  assert.match(powerShell, /SecurityProtocolType\]::Tls12/);
+  assert.doesNotMatch(powerShell, /RuntimeInformation\]::OSArchitecture\.ToString/);
   assert.match(powerShell, /& \$Target/);
   assert.match(component, /irm https:\/\/getbeeapi\.com\/install\.ps1 \| iex/);
 });
