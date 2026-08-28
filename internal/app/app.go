@@ -31,6 +31,7 @@ type runner struct {
 	errOut    io.Writer
 	store     *state.Store
 	logoShown bool
+	optimize  func(string, bool, bool) (routeopt.Result, error)
 }
 
 type credentialMaterial struct {
@@ -242,7 +243,7 @@ func (r *runner) resolveEndpoint(explicit string, assumeYes bool) (string, error
 			}
 		}
 		fmt.Fprintf(r.out, "  %s 当前不可用，开始 Cloudflare IP 优选与 TLS 校验。\n", target.BaseURL)
-		if _, recoverErr := r.optimizeAndMaybeApply(hostFromURL(target.BaseURL), true, assumeYes); recoverErr != nil {
+		if _, recoverErr := r.runRouteOptimization(hostFromURL(target.BaseURL), true, assumeYes); recoverErr != nil {
 			return "", fmt.Errorf("自动修复网络失败: %w", recoverErr)
 		}
 		rechecked := beeapi.ProbeEndpoints(r.ctx, []beeapi.Endpoint{{Name: target.Name, BaseURL: target.BaseURL}})
@@ -265,17 +266,25 @@ func (r *runner) resolveEndpoint(explicit string, assumeYes bool) (string, error
 					return "", confirmErr
 				}
 				if strings.EqualFold(strings.TrimSpace(confirm), "n") {
-					return "", errors.New("所选入口不可用")
+					fmt.Fprintf(r.out, "  已改用当前可访问入口 %s（%s），继续设置。\n", best.BaseURL, durationLabel(best.Latency))
+					selected = best
+				} else {
+					// The user already approved the Hosts change in the prompt above.
+					if _, optErr := r.runRouteOptimization(hostFromURL(selected.BaseURL), true, true); optErr != nil {
+						fmt.Fprintf(r.errOut, "  优选未完成：%v\n", optErr)
+						fmt.Fprintf(r.out, "  已自动回退到可访问入口 %s（%s），继续设置。\n", best.BaseURL, durationLabel(best.Latency))
+						selected = best
+					} else {
+						rechecked := beeapi.ProbeEndpoints(r.ctx, []beeapi.Endpoint{selected})
+						if len(rechecked) != 1 || !rechecked[0].Reachable {
+							fmt.Fprintln(r.errOut, "  优选后的入口复验失败，未将其用于后续配置。")
+							fmt.Fprintf(r.out, "  已自动回退到可访问入口 %s（%s），继续设置。\n", best.BaseURL, durationLabel(best.Latency))
+							selected = best
+						} else {
+							selected = rechecked[0]
+						}
+					}
 				}
-				// The user already approved the Hosts change in the prompt above.
-				if _, optErr := r.optimizeAndMaybeApply(hostFromURL(selected.BaseURL), true, true); optErr != nil {
-					return "", optErr
-				}
-				rechecked := beeapi.ProbeEndpoints(r.ctx, []beeapi.Endpoint{selected})
-				if len(rechecked) != 1 || !rechecked[0].Reachable {
-					return "", errors.New("优选后所选入口仍不可用")
-				}
-				selected = rechecked[0]
 			}
 			best = selected
 		} else if strings.TrimSpace(answer) != "" {
@@ -284,6 +293,13 @@ func (r *runner) resolveEndpoint(explicit string, assumeYes bool) (string, error
 	}
 	fmt.Fprintf(r.out, "  已选择 %s（%s）\n", best.BaseURL, durationLabel(best.Latency))
 	return best.BaseURL, nil
+}
+
+func (r *runner) runRouteOptimization(host string, forceApply, assumeYes bool) (routeopt.Result, error) {
+	if r.optimize != nil {
+		return r.optimize(host, forceApply, assumeYes)
+	}
+	return r.optimizeAndMaybeApply(host, forceApply, assumeYes)
 }
 
 func printEndpoints(out io.Writer, endpoints []beeapi.Endpoint) {

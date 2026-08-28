@@ -30,9 +30,10 @@ CLI 内置 `beeapi.ai` 与 `beeapi.dev` 作为引导入口。它先并发请求�
 
 1. 通过 GetBeeAPI 的固定白名单边缘缓存读取 XIU2/CloudflareSpeedTest 官方 Release 信息；缓存不可用时回退 GitHub API。
 2. 验证 Release API 提供的 SHA-256 digest，限制下载与解压大小，只释放所需二进制、IP 段和许可证文件。
-3. 使用目标 BeeAPI 域名的 `/healthz` 进行 HTTPing；按实际 API 延迟、丢包与稳定性排序，不做与 AI API 场景无关的大文件带宽测速。
-4. 用候选 IP 建立连接，同时保留 BeeAPI 域名作为 URL 与 TLS SNI；只有证书与返回 `{"status":"ok"}` 的健康检查都成功才接受。
-5. 备份 Hosts，并只写入带以下标记的受管区块：
+3. 使用 TCP 443 模式筛出当前网络能够连接的 Cloudflare IP，并按延迟与丢包排序；不对数千个候选直接执行域名 HTTPing，也不做与 AI API 场景无关的大文件带宽测速。
+4. 并发复验前 20 个候选：连接候选 IP，同时保留 BeeAPI 域名作为 URL 与 TLS SNI；只接受证书正确且 `/healthz` 返回 `{"status":"ok"}` 的候选，再按实际 API 响应时间选择最快结果。
+5. 如果全部候选都无法通过业务复验，则判定 Hosts 无法修复当前的域名/SNI 阻断；已有其他可用入口时自动回退并继续设置。
+6. 备份 Hosts，并只写入带以下标记的受管区块：
 
 ```text
 # >>> getbeeapi managed: beeapi.ai

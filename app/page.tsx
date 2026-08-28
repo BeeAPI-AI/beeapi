@@ -51,7 +51,7 @@ const safeguards = [
 const faqs = [
   {
     question: "线路优选具体在选择什么？",
-    answer: "正常入口可访问时不会启动优选。只有需要修复或你主动选择时，才根据 /healthz 延迟、丢包与多次探测结果筛选 Cloudflare IP；最终候选还要通过 BeeAPI 域名的 TLS 与健康响应验证。",
+    answer: "正常入口可访问时不会启动优选。只有需要修复或你主动选择时，才先按 TCP 443 延迟与丢包筛选 Cloudflare IP，再用 BeeAPI 域名的 TLS 与 /healthz 复验前排候选；全部失败会自动回退到已有可用入口。",
   },
   {
     question: "它会直接覆盖我现有的配置吗？",
@@ -302,11 +302,11 @@ export default function Home() {
           <div className="section-heading network-copy">
             <p className="section-kicker">SMART ROUTE SELECTION</p>
             <h2>为 BeeAPI 选择<br />能访问、也更快的线路。</h2>
-            <p>CloudflareSpeedTest 会先排除不可访问的 IP，再根据延迟与稳定性排序。最终候选还要通过 BeeAPI 域名的 TLS 证书与 API 响应验证。</p>
+            <p>CloudflareSpeedTest 先筛出 TCP 443 可达的 IP；CLI 再用 BeeAPI 域名的 TLS 与 /healthz 复验前 20 个候选，并按真实 API 响应选择更快线路。</p>
             <div className="fact-row">
-              <span><strong>01</strong> 可访问性筛选</span>
-              <span><strong>02</strong> API 延迟与稳定性排序</span>
-              <span><strong>03</strong> TLS / API 复验</span>
+              <span><strong>01</strong> TCP 可达性筛选</span>
+              <span><strong>02</strong> TLS / API 实测</span>
+              <span><strong>03</strong> 失败自动回退</span>
             </div>
           </div>
 
@@ -321,9 +321,9 @@ export default function Home() {
             </div>
             <ol className="network-steps">
               <li><span>01</span><p><strong>检查官方域名可用性</strong><small>先判断是否需要优选，并记录可以直接使用的入口</small></p><b>HTTPS</b></li>
-              <li><span>02</span><p><strong>筛选可访问的 Cloudflare IP</strong><small>剔除超时、拒绝连接与响应异常的候选</small></p><b>可访问</b></li>
-              <li><span>03</span><p><strong>按 API 延迟与稳定性排序</strong><small>综合响应延迟、丢包与多次探测结果</small></p><b>低延迟</b></li>
-              <li><span>04</span><p><strong>复验并按需写入 Hosts</strong><small>通过 BeeAPI 域名的 TLS 与 API 验证后再应用</small></p><b>可恢复</b></li>
+              <li><span>02</span><p><strong>筛选 TCP 443 可达 IP</strong><small>按连接延迟与丢包筛出前排候选</small></p><b>可访问</b></li>
+              <li><span>03</span><p><strong>实测 TLS 与 /healthz</strong><small>并发复验前 20 个候选，选择真实 API 响应更快的线路</small></p><b>低延迟</b></li>
+              <li><span>04</span><p><strong>写入 Hosts 或自动回退</strong><small>业务复验通过才写入；全部失败则继续使用可用域名</small></p><b>可恢复</b></li>
             </ol>
           </div>
         </div>

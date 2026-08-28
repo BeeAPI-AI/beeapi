@@ -1,28 +1,29 @@
 package routeopt
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
-func TestCFSTArgsProbeTheBeeAPIBusinessEndpoint(t *testing.T) {
-	args := cfstArgs("/tmp/ip.txt", "/tmp/result.csv", "beeapi.ai")
+func TestCFSTArgsUseTCPForBroadCandidateScan(t *testing.T) {
+	args := cfstArgs("/tmp/ip.txt", "/tmp/result.csv")
 	joined := strings.Join(args, " ")
-	wantURL := "https://beeapi.ai/healthz"
-	if !slices.Contains(args, wantURL) {
-		t.Fatalf("CFST args are missing business probe URL %q: %#v", wantURL, args)
-	}
-	for _, want := range []string{"-httping", "-httping-code", "200", "-dd"} {
+	for _, want := range []string{"-tp", "443", "-tlr", "0.2", "-dd"} {
 		if !slices.Contains(args, want) {
 			t.Fatalf("CFST args are missing %q: %#v", want, args)
 		}
 	}
-	if slices.Contains(args, "https://beeapi.ai/cdn-cgi/trace") || slices.Contains(args, "-dn") || slices.Contains(args, "-dt") {
-		t.Fatalf("CFST args still depend on the unavailable trace or download probe: %#v", args)
+	for _, unwanted := range []string{"-httping", "-httping-code", "-url", "-dn", "-dt"} {
+		if slices.Contains(args, unwanted) {
+			t.Fatalf("broad candidate scan should not use %q: %#v", unwanted, args)
+		}
 	}
 	if !strings.Contains(joined, "-p 0") {
 		t.Fatalf("CFST should suppress its misleading download-speed table: %#v", args)
@@ -75,6 +76,40 @@ func TestParseLatencyResultOmitsUnmeasuredSpeedAndUnknownColo(t *testing.T) {
 	}
 	if result.SpeedMB != "" || result.Colo != "" || result.LatencyMS != "1.25" {
 		t.Fatalf("unexpected latency-only result: %#v", result)
+	}
+}
+
+func TestSelectValidatedCandidateUsesFastestHealthyAPIProbe(t *testing.T) {
+	candidates := []Result{
+		{IP: "104.16.0.1", LatencyMS: "10"},
+		{IP: "104.16.0.2", LatencyMS: "11"},
+		{IP: "104.16.0.3", LatencyMS: "12"},
+	}
+	latencies := map[string]time.Duration{
+		"104.16.0.1": 80 * time.Millisecond,
+		"104.16.0.3": 35 * time.Millisecond,
+	}
+	result, err := selectValidatedCandidate(context.Background(), "beeapi.ai", candidates, func(_ context.Context, _ string, ip string) (time.Duration, error) {
+		latency, ok := latencies[ip]
+		if !ok {
+			return 0, errors.New("blocked")
+		}
+		return latency, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IP != "104.16.0.3" || result.LatencyMS != "35" {
+		t.Fatalf("unexpected validated result: %#v", result)
+	}
+}
+
+func TestSelectValidatedCandidateExplainsDomainLevelBlocking(t *testing.T) {
+	_, err := selectValidatedCandidate(context.Background(), "beeapi.ai", []Result{{IP: "104.16.0.1"}}, func(context.Context, string, string) (time.Duration, error) {
+		return 0, errors.New("tls blocked")
+	})
+	if err == nil || !strings.Contains(err.Error(), "SNI") || !strings.Contains(err.Error(), "Hosts 无法修复") {
+		t.Fatalf("unexpected validation error: %v", err)
 	}
 }
 

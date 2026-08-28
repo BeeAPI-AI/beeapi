@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf16"
 
@@ -374,7 +375,7 @@ func Optimize(ctx context.Context, binaryPath, host string, output io.Writer) (R
 	}
 	defer os.RemoveAll(work)
 	csvPath := filepath.Join(work, "result.csv")
-	args := cfstArgs(ipFile, csvPath, host)
+	args := cfstArgs(ipFile, csvPath)
 	cmd := exec.CommandContext(ctx, binaryPath, args...)
 	cmd.Dir = work
 	cmd.Stdout = output
@@ -382,12 +383,14 @@ func Optimize(ctx context.Context, binaryPath, host string, output io.Writer) (R
 	if err := cmd.Run(); err != nil {
 		return Result{}, cfstRunError(err)
 	}
-	result, err := parseResult(csvPath)
+	candidates, err := parseResults(csvPath)
 	if err != nil {
 		return Result{}, err
 	}
-	if err := ValidatePinnedIP(ctx, host, result.IP); err != nil {
-		return Result{}, fmt.Errorf("最快 IP 未通过 BeeAPI TLS 校验: %w", err)
+	fmt.Fprintf(output, "  正在用 %s 的 TLS 与 /healthz 复验前 %d 个候选 IP…\n", host, min(len(candidates), maxPinnedCandidates))
+	result, err := selectValidatedCandidate(ctx, host, candidates, probePinnedIP)
+	if err != nil {
+		return Result{}, err
 	}
 	return result, nil
 }
@@ -399,7 +402,7 @@ func cfstRunError(err error) error {
 	return fmt.Errorf("CloudflareSpeedTest 执行失败: %w", err)
 }
 
-func cfstArgs(ipFile, csvPath, host string) []string {
+func cfstArgs(ipFile, csvPath string) []string {
 	return []string{
 		"-f", ipFile,
 		"-o", csvPath,
@@ -408,50 +411,119 @@ func cfstArgs(ipFile, csvPath, host string) []string {
 		"-t", "4",
 		"-tp", "443",
 		"-tlr", "0.2",
-		"-url", "https://" + host + "/healthz",
-		"-httping",
-		"-httping-code", "200",
 		"-dd",
 	}
 }
 
 func parseResult(path string) (Result, error) {
+	results, err := parseResults(path)
+	if err != nil {
+		return Result{}, err
+	}
+	return results[0], nil
+}
+
+func parseResults(path string) ([]Result, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return Result{}, errors.New("CFST 没有生成测速结果；当前网络可能阻止直连 Cloudflare IP，请稍后重试或继续使用可用域名")
+			return nil, errors.New("CFST 没有生成测速结果；当前网络可能阻止直连 Cloudflare IP，请稍后重试或继续使用可用域名")
 		}
-		return Result{}, err
+		return nil, err
 	}
 	defer file.Close()
 	rows, err := csv.NewReader(file).ReadAll()
 	if err != nil {
-		return Result{}, err
+		return nil, err
 	}
 	if len(rows) < 2 || len(rows[1]) < 1 {
-		return Result{}, errors.New("CFST 没有返回可用 IP")
+		return nil, errors.New("CFST 没有返回可用 IP")
 	}
-	row := rows[1]
-	result := Result{IP: strings.TrimSpace(row[0])}
-	if net.ParseIP(result.IP) == nil {
-		return Result{}, errors.New("CFST 返回了无效 IP")
+	results := make([]Result, 0, len(rows)-1)
+	for _, row := range rows[1:] {
+		if len(row) < 1 {
+			continue
+		}
+		result := Result{IP: strings.TrimSpace(row[0])}
+		if net.ParseIP(result.IP) == nil {
+			continue
+		}
+		if len(row) > 4 {
+			result.LatencyMS = strings.TrimSpace(row[4])
+		}
+		if len(row) > 6 {
+			result.Colo = strings.TrimSpace(row[6])
+			if strings.EqualFold(result.Colo, "N/A") {
+				result.Colo = ""
+			}
+		}
+		results = append(results, result)
 	}
-	if len(row) > 4 {
-		result.LatencyMS = strings.TrimSpace(row[4])
+	if len(results) == 0 {
+		return nil, errors.New("CFST 没有返回有效 IP")
 	}
-	if len(row) > 6 {
-		result.Colo = strings.TrimSpace(row[6])
-		if strings.EqualFold(result.Colo, "N/A") {
-			result.Colo = ""
+	return results, nil
+}
+
+const maxPinnedCandidates = 20
+
+type pinnedProbe func(context.Context, string, string) (time.Duration, error)
+
+func selectValidatedCandidate(ctx context.Context, host string, candidates []Result, probe pinnedProbe) (Result, error) {
+	limit := min(len(candidates), maxPinnedCandidates)
+	if limit == 0 {
+		return Result{}, errors.New("没有可复验的 Cloudflare IP")
+	}
+	type outcome struct {
+		index   int
+		latency time.Duration
+	}
+	outcomes := make(chan outcome, limit)
+	semaphore := make(chan struct{}, min(limit, 4))
+	var wg sync.WaitGroup
+	for index := range limit {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			select {
+			case semaphore <- struct{}{}:
+				defer func() { <-semaphore }()
+			case <-ctx.Done():
+				return
+			}
+			probeCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
+			latency, err := probe(probeCtx, host, candidates[index].IP)
+			cancel()
+			if err == nil {
+				outcomes <- outcome{index: index, latency: latency}
+			}
+		}()
+	}
+	go func() {
+		wg.Wait()
+		close(outcomes)
+	}()
+
+	bestIndex := -1
+	var bestLatency time.Duration
+	for item := range outcomes {
+		if bestIndex == -1 || item.latency < bestLatency || (item.latency == bestLatency && item.index < bestIndex) {
+			bestIndex = item.index
+			bestLatency = item.latency
 		}
 	}
+	if bestIndex == -1 {
+		return Result{}, fmt.Errorf("CFST 找到 %d 个可连接的 Cloudflare IP，但前 %d 个最快候选都未通过 %s 的 TLS 与 /healthz 验证；该网络可能按域名或 SNI 阻断，Hosts 无法修复", len(candidates), limit, host)
+	}
+	result := candidates[bestIndex]
+	result.LatencyMS = fmt.Sprintf("%.0f", float64(bestLatency)/float64(time.Millisecond))
 	return result, nil
 }
 
-func ValidatePinnedIP(ctx context.Context, host, ip string) error {
+func probePinnedIP(ctx context.Context, host, ip string) (time.Duration, error) {
 	parsed := net.ParseIP(ip)
 	if parsed == nil {
-		return errors.New("无效 IP")
+		return 0, errors.New("无效 IP")
 	}
 	dialer := &net.Dialer{Timeout: 5 * time.Second}
 	transport := &http.Transport{
@@ -464,24 +536,30 @@ func ValidatePinnedIP(ctx context.Context, host, ip string) error {
 	client := &http.Client{Transport: transport, Timeout: 8 * time.Second}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+host+"/healthz", nil)
 	if err != nil {
-		return err
+		return 0, err
 	}
+	started := time.Now()
 	resp, err := client.Do(req)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
-		return fmt.Errorf("HTTP %d", resp.StatusCode)
+		return 0, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 	var health struct {
 		Status string `json:"status"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&health); err != nil || !strings.EqualFold(strings.TrimSpace(health.Status), "ok") {
-		return errors.New("healthz 响应无效")
+		return 0, errors.New("healthz 响应无效")
 	}
-	return nil
+	return time.Since(started), nil
+}
+
+func ValidatePinnedIP(ctx context.Context, host, ip string) error {
+	_, err := probePinnedIP(ctx, host, ip)
+	return err
 }
 
 func HostsPath() string {

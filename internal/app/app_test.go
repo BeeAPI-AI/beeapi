@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/BeeAPI-AI/beeapi/internal/beeapi"
+	"github.com/BeeAPI-AI/beeapi/internal/routeopt"
 	"github.com/BeeAPI-AI/beeapi/internal/state"
 )
 
@@ -143,6 +144,92 @@ func TestRunWithoutArgumentsStartsThreeStepGuideOnlyWhenUninitialized(t *testing
 	}
 	if strings.Contains(text, "欢迎回来") {
 		t.Fatalf("uninitialized user unexpectedly entered the daily shell:\n%s", text)
+	}
+}
+
+func TestUnavailableEndpointChoiceFallsBackToReachableEndpoint(t *testing.T) {
+	previousTransport := http.DefaultTransport
+	http.DefaultTransport = appRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Host == "beeapi.ai" {
+			return nil, errors.New("blocked")
+		}
+		body := `{"status":"ok"}`
+		if request.URL.Path == "/api/v1/public/api-endpoints" {
+			body = `{"code":0,"message":"success","data":{"items":[]}}`
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    request,
+		}, nil
+	})
+	t.Cleanup(func() { http.DefaultTransport = previousTransport })
+
+	input := strings.NewReader("2\nn\n")
+	var output bytes.Buffer
+	r := &runner{
+		ctx:    context.Background(),
+		in:     input,
+		reader: bufio.NewReader(input),
+		out:    &output,
+		errOut: &output,
+	}
+	endpoint, err := r.resolveEndpoint("", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if endpoint != "https://beeapi.dev" {
+		t.Fatalf("endpoint = %q, want reachable fallback", endpoint)
+	}
+	if !strings.Contains(output.String(), "已改用当前可访问入口 https://beeapi.dev") {
+		t.Fatalf("fallback notice missing:\n%s", output.String())
+	}
+}
+
+func TestFailedOptimizationFallsBackToReachableEndpoint(t *testing.T) {
+	previousTransport := http.DefaultTransport
+	http.DefaultTransport = appRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Host == "beeapi.ai" {
+			return nil, errors.New("blocked")
+		}
+		body := `{"status":"ok"}`
+		if request.URL.Path == "/api/v1/public/api-endpoints" {
+			body = `{"code":0,"message":"success","data":{"items":[]}}`
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    request,
+		}, nil
+	})
+	t.Cleanup(func() { http.DefaultTransport = previousTransport })
+
+	input := strings.NewReader("2\ny\n")
+	var output bytes.Buffer
+	r := &runner{
+		ctx:    context.Background(),
+		in:     input,
+		reader: bufio.NewReader(input),
+		out:    &output,
+		errOut: &output,
+		optimize: func(string, bool, bool) (routeopt.Result, error) {
+			return routeopt.Result{}, errors.New("CFST 没有生成测速结果")
+		},
+	}
+	endpoint, err := r.resolveEndpoint("", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if endpoint != "https://beeapi.dev" {
+		t.Fatalf("endpoint = %q, want reachable fallback", endpoint)
+	}
+	text := output.String()
+	for _, want := range []string{"优选未完成", "已自动回退到可访问入口 https://beeapi.dev"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("optimization fallback notice missing %q:\n%s", want, text)
+		}
 	}
 }
 
