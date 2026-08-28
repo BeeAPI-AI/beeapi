@@ -3,6 +3,7 @@ package app
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"flag"
 	"fmt"
@@ -37,12 +38,20 @@ type runner struct {
 }
 
 type credentialMaterial struct {
-	ID           string
-	Name         string
-	Prefix       string
-	SourcePrefix string
-	Secret       string
-	Models       []string
+	ID                        string
+	Name                      string
+	Prefix                    string
+	SourcePrefix              string
+	Secret                    string
+	Models                    []string
+	ModelOptions              []beeapi.ModelOption
+	ModelOptionsAuthoritative bool
+}
+
+type credentialModelDiscovery struct {
+	Models        []string
+	Options       []beeapi.ModelOption
+	Authoritative bool
 }
 
 func Run(ctx context.Context, args []string, version string, in io.Reader, out, errOut io.Writer) error {
@@ -156,7 +165,7 @@ func (r *runner) setup(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(r.out, "  ✓ 已连接 BeeAPI · 已领取 %d 个配置\n", len(credentials))
+	fmt.Fprintf(r.out, "  ✓ 已连接 BeeAPI · 已读取 %d 个可用 API Key\n", len(credentials))
 
 	fmt.Fprintln(r.out, "\n[3/3] 选择工具、密钥配置与模型")
 	environments, err := detectEnvironments()
@@ -483,7 +492,7 @@ func parseAgents(raw string) ([]string, error) {
 }
 
 func (r *runner) authorize(endpoint string, noOpen bool) ([]credentialMaterial, error) {
-	fmt.Fprintln(r.out, "  1. 跳转网站授权登录（推荐；可在网页选择 1–10 个密钥配置）")
+	fmt.Fprintln(r.out, "  1. 跳转网站授权登录（推荐；授权此设备读取账户可用 API Key）")
 	fmt.Fprintln(r.out, "  2. 直接粘贴 API Key（兼容回退）")
 	choice, err := r.ask("  请选择 [1]: ")
 	if err != nil && !errors.Is(err, io.EOF) {
@@ -687,23 +696,76 @@ func (r *runner) pollDevice(client *beeapi.Client, code beeapi.DeviceCode) ([]cr
 				return nil, fmt.Errorf("领取 BeeAPI 设备凭据: %w", claimErr)
 			}
 			credentials := make([]credentialMaterial, 0, len(claim.Credentials))
-			fmt.Fprintln(r.out, "  ✓ 网站授权完成，已领取设备专用配置:")
+			fmt.Fprintln(r.out, "  ✓ 网站授权完成，已获取账户可用 API Key:")
 			for _, item := range claim.Credentials {
-				name := strings.TrimSpace(item.ProfileName)
+				name := strings.TrimSpace(item.KeyName)
+				if name == "" {
+					name = strings.TrimSpace(item.ProfileName)
+				}
 				if name == "" {
 					name = strings.TrimSpace(item.DeviceKeyName)
 				}
 				if name == "" {
-					name = "BeeAPI 配置"
+					name = "BeeAPI API Key"
 				}
-				fmt.Fprintf(r.out, "    • %s · %s\n", name, item.DeviceKeyPrefix)
+				prefix := strings.TrimSpace(item.KeyPrefix)
+				if prefix == "" {
+					prefix = strings.TrimSpace(item.DeviceKeyPrefix)
+				}
+				if prefix == "" {
+					prefix = safeKeyPrefix(item.APIKey)
+				}
+				credentialID := item.CredentialID
+				if claim.CredentialMode == "existing_key_export_v2" {
+					credentialID = stableCredentialID(item.APIKey)
+				}
+				fmt.Fprintf(r.out, "    • %s · %s\n", name, prefix)
 				credentials = append(credentials, credentialMaterial{
-					ID: item.CredentialID, Name: name, Prefix: item.DeviceKeyPrefix,
+					ID: credentialID, Name: name, Prefix: prefix,
 					SourcePrefix: item.SourceKeyPrefix, Secret: item.APIKey,
 				})
 			}
+			if len(claim.Skipped) > 0 {
+				fmt.Fprintln(r.out, "  以下 API Key 当前不可导出，已跳过:")
+				for _, item := range claim.Skipped {
+					name := strings.TrimSpace(item.KeyName)
+					if name == "" {
+						name = "未命名 API Key"
+					}
+					fmt.Fprintf(r.out, "    • %s · %s · %s\n", name, item.KeyPrefix, credentialSkipReason(item.Reason))
+				}
+			}
 			return credentials, nil
 		}
+	}
+}
+
+func stableCredentialID(secret string) string {
+	digest := sha256.Sum256([]byte(strings.TrimSpace(secret)))
+	return fmt.Sprintf("key-%x", digest[:16])
+}
+
+func credentialSkipReason(reason string) string {
+	switch strings.TrimSpace(reason) {
+	case "disabled":
+		return "已停用"
+	case "expired":
+		return "已过期"
+	case "auto_disabled":
+		return "已自动停用"
+	case "plaintext_unavailable":
+		return "原始密钥不可恢复"
+	case "plaintext_hash_mismatch":
+		return "密钥完整性校验失败"
+	case "device_managed":
+		return "旧版设备专用密钥"
+	case "not_found":
+		return "已删除或不存在"
+	default:
+		if strings.TrimSpace(reason) == "" {
+			return "不可导出"
+		}
+		return reason
 	}
 }
 
@@ -747,6 +809,7 @@ func (r *runner) discoverCredentialModels(endpoint string, credentials []credent
 		return nil, errors.New("没有可用的 BeeAPI 凭据")
 	}
 	seen := map[string]bool{}
+	usable := make([]credentialMaterial, 0, len(credentials))
 	for index := range credentials {
 		credentials[index].ID = strings.TrimSpace(credentials[index].ID)
 		credentials[index].Secret = strings.TrimSpace(credentials[index].Secret)
@@ -757,14 +820,25 @@ func (r *runner) discoverCredentialModels(endpoint string, credentials []credent
 			return nil, errors.New("BeeAPI 返回了重复的设备凭据")
 		}
 		seen[credentials[index].ID] = true
-		models, err := r.modelsForCredential(endpoint, credentials[index].Secret)
+		discovery, err := r.modelsForCredential(endpoint, credentials[index].Secret)
 		if err != nil {
-			return nil, fmt.Errorf("配置 %q: %w", credentials[index].Name, err)
+			fmt.Fprintf(r.out, "    ↷ %s · 已跳过：%v\n", credentials[index].Name, err)
+			continue
 		}
-		credentials[index].Models = models
-		fmt.Fprintf(r.out, "    %s · 可用模型 %d 个\n", credentials[index].Name, len(models))
+		credentials[index].Models = discovery.Models
+		credentials[index].ModelOptions = discovery.Options
+		credentials[index].ModelOptionsAuthoritative = discovery.Authoritative
+		capabilityLabel := "旧版兼容发现"
+		if discovery.Authoritative {
+			capabilityLabel = "已验证协议能力"
+		}
+		fmt.Fprintf(r.out, "    %s · 可用模型 %d 个 · %s\n", credentials[index].Name, len(discovery.Models), capabilityLabel)
+		usable = append(usable, credentials[index])
 	}
-	return credentials, nil
+	if len(usable) == 0 {
+		return nil, errors.New("所有 API Key 都无法读取可用模型，请在 BeeAPI 检查 Key 状态与路由后重试")
+	}
+	return usable, nil
 }
 
 func (r *runner) selectCredentialAssignments(agents []string, credentials []credentialMaterial, existing map[string]string, assumeYes bool) (map[string]string, error) {
@@ -784,31 +858,102 @@ func (r *runner) selectCredentialAssignments(agents []string, credentials []cred
 			fmt.Fprintf(r.out, "    %s 与 %s 共享本地配置，使用同一密钥配置\n", agentLabel(agent), agentLabel(peer))
 			continue
 		}
-		defaultIndex := 0
-		if id := strings.TrimSpace(existing[agent]); id != "" {
-			if index := credentialIndex(credentials, id); index >= 0 {
-				defaultIndex = index
+		compatible := compatibleCredentialIndexes(agent, credentials)
+		if len(compatible) == 0 {
+			return nil, fmt.Errorf("所有已读取的 API Key 都没有支持 %s 所需的 %s 模型",
+				agentLabel(agent), agentProtocolLabel(agent))
+		}
+
+		defaultIndex := compatible[0]
+		existingIndex := -1
+		existingID := strings.TrimSpace(existing[agent])
+		if existingID != "" {
+			existingIndex = credentialIndex(credentials, existingID)
+			if credentialIndexIncluded(compatible, existingIndex) {
+				defaultIndex = existingIndex
+			} else if existingIndex >= 0 {
+				_, compatibilityErr := compatibleModelsForAgent(agent, credentials[existingIndex])
+				fmt.Fprintf(r.out, "    %s 当前的 Key %s 不可用：%v\n",
+					agentLabel(agent), credentials[existingIndex].Name, compatibilityErr)
+			} else {
+				fmt.Fprintf(r.out, "    %s 当前保存的 Key 已无法读取模型，将选择其他兼容 Key\n", agentLabel(agent))
 			}
 		}
-		if len(credentials) == 1 || assumeYes {
+		if len(credentials) == 1 {
 			assignments[agent] = credentials[defaultIndex].ID
 			continue
 		}
-		answer, err := r.ask(fmt.Sprintf("  %s 使用哪个配置？[%d]: ", agentLabel(agent), defaultIndex+1))
-		if err != nil && !errors.Is(err, io.EOF) {
-			return nil, err
-		}
-		index := defaultIndex
-		if strings.TrimSpace(answer) != "" {
-			number, convErr := strconv.Atoi(strings.TrimSpace(answer))
-			if convErr != nil || number < 1 || number > len(credentials) {
-				return nil, fmt.Errorf("%s 的配置编号无效", agentLabel(agent))
+		if assumeYes {
+			assignments[agent] = credentials[defaultIndex].ID
+			if existingID != "" && existingID != credentials[defaultIndex].ID {
+				fmt.Fprintf(r.out, "    %s 已自动改用 %s\n", agentLabel(agent), credentials[defaultIndex].Name)
 			}
-			index = number - 1
+			continue
 		}
-		assignments[agent] = credentials[index].ID
+		if len(compatible) == 1 {
+			assignments[agent] = credentials[defaultIndex].ID
+			fmt.Fprintf(r.out, "    %s 仅 %s 有兼容模型，已自动选择\n", agentLabel(agent), credentials[defaultIndex].Name)
+			continue
+		}
+
+		fmt.Fprintf(r.out, "  %s 可用的 API Key:\n", agentLabel(agent))
+		for _, index := range compatible {
+			fmt.Fprintf(r.out, "    %d. %s · %s · %d 个兼容模型\n",
+				index+1, credentials[index].Name, credentials[index].Prefix, compatibleModelCount(agent, credentials[index]))
+		}
+		for {
+			answer, err := r.ask(fmt.Sprintf("  %s 使用哪个 Key？[%d]: ", agentLabel(agent), defaultIndex+1))
+			if err != nil && !errors.Is(err, io.EOF) {
+				return nil, err
+			}
+			index := defaultIndex
+			if strings.TrimSpace(answer) != "" {
+				number, convErr := strconv.Atoi(strings.TrimSpace(answer))
+				if convErr != nil || number < 1 || number > len(credentials) {
+					fmt.Fprintf(r.out, "    %s 的 Key 编号无效，请重新选择。\n", agentLabel(agent))
+					continue
+				}
+				index = number - 1
+			}
+			if !credentialIndexIncluded(compatible, index) {
+				_, compatibilityErr := compatibleModelsForAgent(agent, credentials[index])
+				fmt.Fprintf(r.out, "    %s 没有可用的 %s 模型：%v\n",
+					credentials[index].Name, agentLabel(agent), compatibilityErr)
+				fmt.Fprintln(r.out, "    请从上方可用 Key 中重新选择。")
+				continue
+			}
+			assignments[agent] = credentials[index].ID
+			break
+		}
 	}
 	return assignments, nil
+}
+
+func compatibleCredentialIndexes(agent string, credentials []credentialMaterial) []int {
+	indexes := make([]int, 0, len(credentials))
+	for index, credential := range credentials {
+		if _, err := compatibleModelsForAgent(agent, credential); err == nil {
+			indexes = append(indexes, index)
+		}
+	}
+	return indexes
+}
+
+func credentialIndexIncluded(indexes []int, wanted int) bool {
+	for _, index := range indexes {
+		if index == wanted {
+			return true
+		}
+	}
+	return false
+}
+
+func compatibleModelCount(agent string, credential credentialMaterial) int {
+	models, err := compatibleModelsForAgent(agent, credential)
+	if err != nil {
+		return 0
+	}
+	return len(models)
 }
 
 func sharedClaudePeer(agent string) string {
@@ -840,7 +985,8 @@ func credentialForID(credentials []credentialMaterial, id string) (credentialMat
 
 func (r *runner) selectModelsForAssignments(agents []string, credentials []credentialMaterial, assignments map[string]string, assumeYes bool) (map[string]string, error) {
 	selected := map[string]string{}
-	fmt.Fprintln(r.out, "\n  根据所选密钥配置匹配模型")
+	allAuthoritative := true
+	fmt.Fprintln(r.out, "\n  根据 API Key 的协议能力匹配模型")
 	for _, agent := range agents {
 		if peer := sharedClaudePeer(agent); peer != "" && selected[peer] != "" {
 			selected[agent] = selected[peer]
@@ -850,13 +996,25 @@ func (r *runner) selectModelsForAssignments(agents []string, credentials []crede
 		if !ok || len(credential.Models) == 0 {
 			return nil, fmt.Errorf("%s 没有可用的密钥配置或模型", agentLabel(agent))
 		}
-		selected[agent] = recommendedModel(agent, credential.Models)
-		fmt.Fprintf(r.out, "  %-16s %-24s %s\n", agentLabel(agent), credential.Name, selected[agent])
+		model, matchLabel, err := matchedModel(agent, credential)
+		if err != nil {
+			return nil, fmt.Errorf("%s · %s: %w", agentLabel(agent), credential.Name, err)
+		}
+		selected[agent] = model
+		if !credential.ModelOptionsAuthoritative {
+			allAuthoritative = false
+		}
+		fmt.Fprintf(r.out, "  %-16s %-24s %s · %s\n", agentLabel(agent), credential.Name, model, matchLabel)
 	}
 	if assumeYes {
 		return selected, nil
 	}
-	answer, err := r.ask("  使用以上推荐模型？[Y/n]: ")
+	prompt := "  使用以上协议匹配模型？[Y/n]: "
+	if !allAuthoritative {
+		fmt.Fprintln(r.out, "  提示：部分 Key 所在服务端未提供协议元数据，已对其使用旧版默认候选。")
+		prompt = "  使用以上匹配结果？[Y/n]: "
+	}
+	answer, err := r.ask(prompt)
 	if err != nil && !errors.Is(err, io.EOF) {
 		return nil, err
 	}
@@ -871,7 +1029,11 @@ func (r *runner) selectModelsForAssignments(agents []string, credentials []crede
 			continue
 		}
 		credential, _ := credentialForID(credentials, assignments[agent])
-		fmt.Fprintf(r.out, "  %s 可用模型: %s\n", agentLabel(agent), strings.Join(credential.Models[:min(len(credential.Models), 12)], ", "))
+		compatibleModels, compatibleErr := compatibleModelsForAgent(agent, credential)
+		if compatibleErr != nil {
+			return nil, fmt.Errorf("%s · %s: %w", agentLabel(agent), credential.Name, compatibleErr)
+		}
+		fmt.Fprintf(r.out, "  %s 可用模型: %s\n", agentLabel(agent), strings.Join(compatibleModels[:min(len(compatibleModels), 12)], ", "))
 		value, readErr := r.ask(fmt.Sprintf("  %s 模型 [%s]: ", agentLabel(agent), selected[agent]))
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
 			return nil, readErr
@@ -881,7 +1043,10 @@ func (r *runner) selectModelsForAssignments(agents []string, credentials []crede
 			customized[agent] = true
 			continue
 		}
-		if !containsExact(credential.Models, value) {
+		if !containsExact(compatibleModels, value) {
+			if credential.ModelOptionsAuthoritative {
+				return nil, fmt.Errorf("模型 %q 不支持 %s 所需的 %s 协议", value, agentLabel(agent), agentProtocolLabel(agent))
+			}
 			return nil, fmt.Errorf("模型 %q 不在 %s 的可用列表中", value, credential.Name)
 		}
 		selected[agent] = value
@@ -993,6 +1158,118 @@ func recommendedModel(agent string, models []string) string {
 	return models[0]
 }
 
+func matchedModel(agent string, credential credentialMaterial) (string, string, error) {
+	models, err := compatibleModelsForAgent(agent, credential)
+	if err != nil {
+		return "", "", err
+	}
+	if !credential.ModelOptionsAuthoritative {
+		return recommendedModel(agent, models), "默认候选", nil
+	}
+	option, ok := modelOptionForID(credential.ModelOptions, models[0])
+	if !ok {
+		return "", "", errors.New("模型协议元数据不完整")
+	}
+	label := agentProtocolLabel(agent)
+	label += " · 客户端适配"
+	return option.ID, label, nil
+}
+
+func compatibleModelsForAgent(agent string, credential credentialMaterial) ([]string, error) {
+	if !credential.ModelOptionsAuthoritative {
+		if len(credential.Models) == 0 {
+			return nil, errors.New("没有可用模型")
+		}
+		return append([]string(nil), credential.Models...), nil
+	}
+	requiredProtocol := agentProtocol(agent)
+	if requiredProtocol == "" {
+		return nil, fmt.Errorf("未定义工具 %q 的协议", agent)
+	}
+	options := make([]beeapi.ModelOption, 0, len(credential.ModelOptions))
+	for _, option := range credential.ModelOptions {
+		if containsExact(option.Protocols, requiredProtocol) && optionSupportsAgent(agent, option) {
+			options = append(options, option)
+		}
+	}
+	if len(options) == 0 {
+		return nil, fmt.Errorf("该 API Key 没有支持 %s 的模型，请选择其他 Key", agentProtocolLabel(agent))
+	}
+	// BeeAPI priority already combines API-key route order with the model
+	// ordering used by its marketplace. Keep equal scores in server order.
+	sort.SliceStable(options, func(i, j int) bool { return options[i].Priority > options[j].Priority })
+	models := make([]string, 0, len(options))
+	for _, option := range options {
+		models = append(models, option.ID)
+	}
+	return models, nil
+}
+
+func optionSupportsAgent(agent string, option beeapi.ModelOption) bool {
+	for _, tag := range agentRecommendationTags(agent) {
+		if containsExact(option.RecommendedFor, tag) {
+			return true
+		}
+	}
+	return false
+}
+
+func agentRecommendationTags(agent string) []string {
+	switch agent {
+	case "claude", "claude-desktop":
+		return []string{"claude_code"}
+	case "codex":
+		return []string{"codex"}
+	case "gemini":
+		return []string{"gemini_cli"}
+	case "grok", "openclaw":
+		return []string{"chatgpt"}
+	case "opencode", "hermes":
+		return []string{"openai_compatible"}
+	default:
+		return nil
+	}
+}
+
+func agentProtocol(agent string) string {
+	switch agent {
+	case "claude", "claude-desktop":
+		return "anthropic/messages"
+	case "codex", "grok", "openclaw":
+		return "openai/responses"
+	case "gemini":
+		return "gemini/contents"
+	case "opencode", "hermes":
+		return "openai/chat_completions"
+	default:
+		return ""
+	}
+}
+
+func agentProtocolLabel(agent string) string {
+	switch agentProtocol(agent) {
+	case "anthropic/messages":
+		return "Anthropic Messages"
+	case "openai/responses":
+		return "OpenAI Responses"
+	case "gemini/contents":
+		return "Gemini Contents"
+	case "openai/chat_completions":
+		return "OpenAI Chat Completions"
+	default:
+		return "未知"
+	}
+}
+
+func modelOptionForID(options []beeapi.ModelOption, id string) (beeapi.ModelOption, bool) {
+	for _, option := range options {
+		if option.ID == id {
+			return option, true
+		}
+	}
+	return beeapi.ModelOption{}, false
+}
+
 func (r *runner) detect() error {
 	fmt.Fprintln(r.out, "\n检查本机 AI 工具环境")
 	environments, err := detectEnvironments()
@@ -1040,13 +1317,36 @@ func (r *runner) configure(args []string) error {
 			models[agent] = cfg.DefaultModel
 		}
 	}
-	credentials, err := r.loadCredentialMaterials(cfg, false)
+	credentials, err := r.loadCredentialMaterials(cfg, true)
 	if err != nil {
 		return err
 	}
 	assignments, err := r.selectCredentialAssignments(agents, credentials, cfg.AgentCredentials, true)
 	if err != nil {
 		return err
+	}
+	for _, agent := range agents {
+		credential, ok := credentialForID(credentials, assignments[agent])
+		if !ok {
+			return fmt.Errorf("%s 没有对应的本地凭据", agentLabel(agent))
+		}
+		compatible, compatibilityErr := compatibleModelsForAgent(agent, credential)
+		if compatibilityErr != nil {
+			return fmt.Errorf("%s · %s: %w", agentLabel(agent), credential.Name, compatibilityErr)
+		}
+		if containsExact(compatible, models[agent]) {
+			continue
+		}
+		if modelFlag != "" {
+			return fmt.Errorf("模型 %q 不适用于 %s 当前选择的 Key %s", modelFlag, agentLabel(agent), credential.Name)
+		}
+		model, _, matchErr := matchedModel(agent, credential)
+		if matchErr != nil {
+			return fmt.Errorf("%s · %s: %w", agentLabel(agent), credential.Name, matchErr)
+		}
+		models[agent] = model
+		fmt.Fprintf(r.out, "%s 当前模型不可用，已按 BeeAPI 优先级改用 %s · %s\n",
+			agentLabel(agent), credential.Name, model)
 	}
 	apiKeys, err := apiKeysForAssignments(agents, credentials, assignments)
 	if err != nil {

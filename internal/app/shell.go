@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -136,7 +137,7 @@ func printHomeStatus(out io.Writer, cfg state.Config) {
 	fmt.Fprintf(out, "  BeeAPI  %s\n", cfg.Endpoint)
 	credentialLabel := strings.TrimSpace(cfg.KeyName)
 	if len(cfg.Credentials) > 1 {
-		credentialLabel = fmt.Sprintf("%d 个设备专用配置", len(cfg.Credentials))
+		credentialLabel = fmt.Sprintf("%d 个 BeeAPI Key", len(cfg.Credentials))
 	} else if len(cfg.Credentials) == 1 && strings.TrimSpace(cfg.Credentials[0].Name) != "" {
 		credentialLabel = cfg.Credentials[0].Name
 	}
@@ -335,18 +336,52 @@ func (r *runner) reconnect() error {
 	return nil
 }
 
-func (r *runner) modelsForCredential(endpoint, secret string) ([]string, error) {
+func (r *runner) modelsForCredential(endpoint, secret string) (credentialModelDiscovery, error) {
 	client := beeapi.New(endpoint)
+	optionCtx, cancel := context.WithTimeout(r.ctx, 15*time.Second)
+	options, err := client.ModelOptions(optionCtx, secret)
+	cancel()
+	if err == nil {
+		if len(options) == 0 {
+			return credentialModelDiscovery{}, errors.New("该 API Key 当前没有可用模型")
+		}
+		models := make([]string, 0, len(options))
+		for _, option := range options {
+			models = append(models, option.ID)
+		}
+		return credentialModelDiscovery{Models: models, Options: options, Authoritative: true}, nil
+	}
+	if !modelOptionsUnavailable(err) {
+		return credentialModelDiscovery{}, fmt.Errorf("API Key 校验或模型能力发现失败: %w", err)
+	}
+
 	modelCtx, cancel := context.WithTimeout(r.ctx, 15*time.Second)
 	defer cancel()
 	models, err := client.Models(modelCtx, secret)
 	if err != nil {
-		return nil, fmt.Errorf("API Key 校验或模型发现失败: %w", err)
+		return credentialModelDiscovery{}, fmt.Errorf("API Key 校验或模型发现失败: %w", err)
 	}
 	if len(models) == 0 {
-		return nil, errors.New("该 API Key 当前没有可用模型")
+		return credentialModelDiscovery{}, errors.New("该 API Key 当前没有可用模型")
 	}
-	return models, nil
+	return credentialModelDiscovery{Models: models}, nil
+}
+
+func modelOptionsUnavailable(err error) bool {
+	var apiErr *beeapi.APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	switch apiErr.Status {
+	case http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusNotImplemented:
+		return true
+	}
+	switch apiErr.Code {
+	case http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusNotImplemented:
+		return true
+	default:
+		return false
+	}
 }
 
 func (r *runner) networkMenu() error {

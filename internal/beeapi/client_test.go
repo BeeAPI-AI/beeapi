@@ -35,6 +35,34 @@ func TestModelsDeduplicatesAndRanks(t *testing.T) {
 	}
 }
 
+func TestModelOptionsUsesBeeAPIEnvelopeAndAPIKeyAuth(t *testing.T) {
+	client := New("https://beeapi.test")
+	client.HTTP = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/client/model-options" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer sk-model-options" {
+			t.Fatalf("unexpected authorization header: %q", got)
+		}
+		body := `{"code":0,"message":"success","data":{"models":[{"id":"gpt-5.6","protocols":["openai/responses"],"capabilities":["reasoning","tools"],"recommended_for":["codex"],"priority":98,"context_window_tokens":400000,"max_output_tokens":128000},{"id":"gpt-5.6","protocols":["openai/responses"],"priority":1},{"id":" ","protocols":[]}]}}`
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewBufferString(body)), Request: r}, nil
+	})}
+
+	options, err := client.ModelOptions(context.Background(), " sk-model-options ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(options) != 1 || options[0].ID != "gpt-5.6" || options[0].Priority != 98 {
+		t.Fatalf("unexpected model options: %#v", options)
+	}
+	if !reflect.DeepEqual(options[0].Protocols, []string{"openai/responses"}) || !reflect.DeepEqual(options[0].RecommendedFor, []string{"codex"}) {
+		t.Fatalf("model capability metadata was not decoded: %#v", options[0])
+	}
+	if options[0].ContextWindowTokens == nil || *options[0].ContextWindowTokens != 400000 {
+		t.Fatalf("context window was not decoded: %#v", options[0].ContextWindowTokens)
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (fn roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
@@ -173,5 +201,28 @@ func TestCLISessionClaimsDeviceSpecificCredentials(t *testing.T) {
 	}
 	if requests != 1 {
 		t.Fatalf("claim request count = %d, want 1", requests)
+	}
+}
+
+func TestCLISessionClaimsExistingAccountKeysAndSkippedMetadata(t *testing.T) {
+	client := New("https://beeapi.test")
+	client.Token = "beecli-session"
+	client.HTTP = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		body := `{"code":0,"message":"ok","data":{"credential_mode":"existing_key_export_v2","credentials":[{"credential_id":"bck_key-1","key_name":"OpenAI Plus","key_prefix":"sk-live","status":"enabled","expires_at":null,"api_key":"sk-existing-secret"}],"skipped":[{"credential_id":"bck_key-2","key_name":"旧密钥","key_prefix":"sk-old","status":"enabled","reason":"plaintext_unavailable"}],"retry_until":"2026-08-28T12:00:00Z"}}`
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewBufferString(body)), Request: r}, nil
+	})}
+
+	claim, err := client.ClaimCLICredentials(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.CredentialMode != "existing_key_export_v2" || len(claim.Credentials) != 1 || claim.Credentials[0].KeyName != "OpenAI Plus" {
+		t.Fatalf("unexpected credentials: %#v", claim.Credentials)
+	}
+	if claim.Credentials[0].APIKey != "sk-existing-secret" || claim.Credentials[0].KeyPrefix != "sk-live" {
+		t.Fatalf("existing key payload was not decoded: %#v", claim.Credentials[0])
+	}
+	if len(claim.Skipped) != 1 || claim.Skipped[0].Reason != "plaintext_unavailable" {
+		t.Fatalf("skipped metadata was not decoded: %#v", claim.Skipped)
 	}
 }

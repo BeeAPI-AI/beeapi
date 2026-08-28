@@ -8,7 +8,7 @@
 beeapi
   ├─ 未初始化 → 显示 Logo → 三步首次设置
   │    ├─ 1. 选择可用入口，必要时优选 IP
-  │    ├─ 2. 网站选择配置并授权/粘贴单 Key，获取可用模型
+  │    ├─ 2. 网站授权设备/粘贴单 Key，读取既有 Key 与模型能力
   │    └─ 3. 识别工具、分配密钥与模型、备份并写入
   └─ 已初始化 → 显示 Logo、连接摘要与功能主页
        ├─ 启动已配置的 AI 工具
@@ -45,7 +45,7 @@ CLI 内置 `beeapi.ai` 与 `beeapi.dev` 作为引导入口。它先并发请求�
 
 ## 登录与凭据
 
-默认采用 [设备授权](device-authorization.md)。CLI 只持有 `device_code` 并轮询，不接触用户名、密码、OAuth 凭据、2FA 验证码或网页 Cookie。设备授权请求与短期登录令牌使用同一枚进程内临时 P-256 DPoP 密钥绑定。用户在官方批准页选择 1–10 个现有密钥配置；服务端据此创建新的设备专用子 Key，CLI 用短期令牌一次领取这些新 Key，并逐个请求 `/v1/models`。账户原 Key 明文永不进入 CLI。
+默认采用 [设备授权](device-authorization.md)。CLI 只持有 `device_code` 并轮询，不接触用户名、密码、OAuth 凭据、2FA 验证码或网页 Cookie。设备授权请求与短期登录令牌使用同一枚进程内临时 P-256 DPoP 密钥绑定。用户在官方页面核对并授权设备后，CLI 用短期令牌一次领取账户当时可导出的现有 API Key，不创建新的 Key；随后逐个读取模型能力，并在终端为工具分配 Key 与模型。
 
 如果服务端尚未实现设备授权，或用户主动选择兼容模式，CLI 接受粘贴的 API Key。输入尽量关闭终端回显。
 
@@ -70,7 +70,7 @@ CLI 内置 `beeapi.ai` 与 `beeapi.dev` 作为引导入口。它先并发请求�
 | OpenClaw | `openclaw` 或本地配置 | 深度合并 BeeAPI provider 与默认模型 |
 | Hermes | `hermes` 或 `~/.hermes/config.yaml` | 写 GetBeeAPI 专用 `HERMES_HOME` custom provider，由 `beeapi run hermes` 注入凭据并启动 |
 
-每个工具可以选择不同的设备凭据及该凭据可用的模型。Claude Code 与 Claude Desktop Code 因共享同一设置文件，必须共用凭据与模型。所有目标文件在第一次写入前归入同一个备份清单；任一写入失败就回滚整个批次。
+每个工具可以选择不同的账户现有 API Key 及该 Key 可用的模型。CLI 先按服务端返回的协议与客户端适配性筛选，再直接采用服务端 `priority`：API Key 路由优先级是第一层，同一路由内沿用 BeeAPI 商家市场的模型排列。CLI 不再用模型名、上下文长度或本地偏好覆盖该顺序；只有旧服务端缺少专用能力接口时才回退到默认候选。当前或用户刚选的 Key 没有该工具的兼容模型时，CLI 会列出其他兼容 Key 并要求重选；只剩一个候选时自动切换，全部不兼容才停止。Claude Code 与 Claude Desktop Code 因共享同一设置文件，必须共用 Key 与模型。所有目标文件在第一次写入前归入同一个备份清单；任一写入失败就回滚整个批次。
 
 Claude Desktop 的适配范围是其中的 Code 模式：Anthropic 官方说明 Code 模式与 Claude Code 共享设置，因此能够使用 BeeAPI 配置。普通 Claude 聊天仍由 Anthropic 账户提供模型，不支持用本地配置替换底层 API，GetBeeAPI 不会把 MCP 连接伪装成模型替换。
 

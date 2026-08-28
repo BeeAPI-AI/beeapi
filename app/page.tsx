@@ -13,8 +13,8 @@ const phases = [
     number: "02",
     key: "AUTH",
     title: "连接 BeeAPI",
-    description: "在 BeeAPI 官方页面登录、核对设备，并选择 1–10 个密钥配置。批准后，CLI 领取对应的设备专用 Key 并分别读取可用模型；也可直接粘贴单个 Key。",
-    note: "网页选配置 → 设备凭据 → 获取模型",
+    description: "在 BeeAPI 官方页面登录并核对设备。批准后，CLI 一次读取账户当前可用的 API Key，再分别获取模型；也可直接粘贴单个 Key。",
+    note: "网页批准设备 → 读取可用 Key → 获取模型",
   },
   {
     number: "03",
@@ -45,7 +45,7 @@ const safeguards = [
   { title: "下载可验证", text: "发行文件来源固定；优先走 GetBeeAPI 边缘缓存，失败回退 GitHub，并始终核对 SHA-256。" },
   { title: "线路可验证", text: "候选 IP 仍使用 BeeAPI 域名完成 TLS 握手，证书不匹配立即拒绝。" },
   { title: "修改可恢复", text: "配置与 Hosts 写入前分别备份，受管区块不触碰用户的其他内容。" },
-  { title: "凭据有边界", text: "短期 CLI 令牌只领取网页批准的设备专用 Key；账户原 Key 与网页登录会话不会进入 CLI。" },
+  { title: "授权看得见", text: "网页会明确显示设备和授权范围；CLI 不接触密码、2FA 或网页会话，只在批准后一次读取现有可用 Key。" },
 ];
 
 const faqs = [
@@ -243,7 +243,7 @@ export default function Home() {
             <p className="section-kicker">AUTHORIZATION</p>
             <h2>用熟悉的方式，<br />连接 BeeAPI。</h2>
           </div>
-          <p>推荐在 BeeAPI 官方网页完成登录、核对设备并选择密钥配置；批准后 CLI 只领取新建的设备专用 Key。也可以直接粘贴单个 Key。两种方式都不会让 CLI 接触账号密码。</p>
+          <p>推荐在 BeeAPI 官方网页完成登录、核对并授权设备；批准后 CLI 一次读取账户当前可用的现有 Key，不会额外创建 Key。也可以直接粘贴单个 Key。两种方式都不会让 CLI 接触账号密码。</p>
         </div>
 
         <div className="auth-grid">
@@ -253,7 +253,7 @@ export default function Home() {
               <span className="recommended-pill"><i />推荐</span>
             </div>
             <h3>网页登录并批准设备</h3>
-            <p>在官方网页选择 1–10 个可用密钥配置并批准。BeeAPI 会为本设备创建相互独立、可单独撤销的 Key；CLI 不会读取账户原 Key 的明文。</p>
+            <p>在官方网页核对设备并批准。BeeAPI 会把账户当时可导出的可用 Key 一次性交给 CLI；Key 与工具的选择留在终端完成，不创建重复密钥。</p>
             <div className="browser-preview" aria-label="BeeAPI 网页授权界面示意">
               <div className="browser-preview-bar">
                 <span><i />beeapi.ai/cli/authorize</span>
@@ -262,13 +262,13 @@ export default function Home() {
               <div className="approval-preview">
                 <span className="preview-icon">B</span>
                 <p><strong>GetBeeAPI 请求登录</strong><small>设备代码 · HM7K-WQ2P</small></p>
-                <span className="mock-button">选择配置并批准</span>
+                <span className="mock-button">批准此设备</span>
               </div>
             </div>
             <ul className="quiet-list">
               <li>密码、2FA 与网页 Cookie 不进入 CLI</li>
               <li>SSH 终端会显示完整授权网址与设备码，可在其他设备打开</li>
-              <li>每个设备 Key 都能在 BeeAPI 账户页独立撤销</li>
+              <li>授权页会显示本次可读取的 Key 数量与范围</li>
             </ul>
           </article>
 
@@ -293,7 +293,7 @@ export default function Home() {
 
         <div className="service-note">
           <span>BeeAPI 服务端契约</span>
-          <p>设备授权使用进程内临时 DPoP 密钥绑定；短期配置令牌只能领取网页已批准的设备凭据，不能访问 /me、模型转发或其他账户管理接口。</p>
+          <p>设备授权使用进程内临时 DPoP 密钥绑定；短期配置令牌只能一次领取批准时账户中可导出的现有 Key，不能访问 /me、模型转发或其他账户管理接口。</p>
           <a href="https://github.com/BeeAPI-AI/beeapi/blob/main/docs/device-authorization.md">查看设计文档 <span>↗</span></a>
         </div>
       </section>

@@ -49,6 +49,17 @@ func TestAuthorizeOffersExplicitAPIKeyFallbackWithoutPassword(t *testing.T) {
 	}
 }
 
+func TestStableCredentialIDDeduplicatesRepeatedExistingKeyExports(t *testing.T) {
+	first := stableCredentialID("sk-existing-secret")
+	second := stableCredentialID("  sk-existing-secret\n")
+	if first != second || !strings.HasPrefix(first, "key-") {
+		t.Fatalf("stable credential IDs differ: %q != %q", first, second)
+	}
+	if first == stableCredentialID("sk-other-secret") {
+		t.Fatal("different API keys received the same local credential ID")
+	}
+}
+
 func TestDeviceAuthorizationPrintsCompleteURLForHeadlessTerminal(t *testing.T) {
 	t.Setenv("SSH_CONNECTION", "192.0.2.10 12345 192.0.2.20 22")
 	var output bytes.Buffer
@@ -391,6 +402,244 @@ func TestMultiCredentialAssignmentKeepsSharedClaudeConfigurationTogether(t *test
 	}
 	if !strings.Contains(output.String(), "共享本地配置") {
 		t.Fatalf("shared configuration notice missing:\n%s", output.String())
+	}
+}
+
+func TestCodexModelSelectionUsesBeeAPIServerPriority(t *testing.T) {
+	credentials := []credentialMaterial{{
+		ID: "openai-plus", Name: "OpenAI-Plus key", Models: []string{"gpt-5.5", "claude-sonnet", "gpt-5.6"},
+		ModelOptionsAuthoritative: true,
+		ModelOptions: []beeapi.ModelOption{
+			{ID: "gpt-5.5", Protocols: []string{"openai/responses"}, Capabilities: []string{"tools"}, RecommendedFor: []string{"codex"}, Priority: 90},
+			{ID: "claude-sonnet", Protocols: []string{"anthropic/messages"}, Capabilities: []string{"tools"}, RecommendedFor: []string{"claude_code"}, Priority: 100},
+			{ID: "gpt-5.6", Protocols: []string{"openai/responses"}, Capabilities: []string{"tools"}, RecommendedFor: []string{"codex"}, Priority: 91},
+		},
+	}}
+	var output bytes.Buffer
+	r := &runner{out: &output, errOut: &output}
+	models, err := r.selectModelsForAssignments(
+		[]string{"codex"}, credentials, map[string]string{"codex": "openai-plus"}, true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if models["codex"] != "gpt-5.6" {
+		t.Fatalf("Codex model = %q, want highest BeeAPI priority", models["codex"])
+	}
+	text := output.String()
+	if !strings.Contains(text, "OpenAI Responses") || !strings.Contains(text, "客户端适配") {
+		t.Fatalf("protocol match details missing:\n%s", text)
+	}
+}
+
+func TestAuthoritativeModelSelectionDoesNotOverrideBeeAPIServerPriority(t *testing.T) {
+	credential := credentialMaterial{
+		ID: "server-ranked", Name: "Server-ranked key", ModelOptionsAuthoritative: true,
+		ModelOptions: []beeapi.ModelOption{
+			{ID: "gpt-5.5", Protocols: []string{"openai/responses"}, RecommendedFor: []string{"codex"}, Priority: 100},
+			{ID: "gpt-5.6", Protocols: []string{"openai/responses"}, Capabilities: []string{"tools"}, RecommendedFor: []string{"codex"}, Priority: 90, ContextWindowTokens: intPointer(400000)},
+		},
+	}
+	model, _, err := matchedModel("codex", credential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if model != "gpt-5.5" {
+		t.Fatalf("model = %q, want BeeAPI's higher-priority model", model)
+	}
+}
+
+func TestAuthoritativeModelSelectionRejectsProtocolMismatch(t *testing.T) {
+	credential := credentialMaterial{
+		ID: "chat-only", Name: "Chat-only key", Models: []string{"gpt-chat"}, ModelOptionsAuthoritative: true,
+		ModelOptions: []beeapi.ModelOption{{ID: "gpt-chat", Protocols: []string{"openai/chat_completions"}, RecommendedFor: []string{"openai_compatible"}, Priority: 100}},
+	}
+	_, _, err := matchedModel("codex", credential)
+	if err == nil || !strings.Contains(err.Error(), "OpenAI Responses") {
+		t.Fatalf("unexpected protocol mismatch result: %v", err)
+	}
+}
+
+func TestAuthoritativeModelSelectionRejectsClientRestrictionMismatch(t *testing.T) {
+	credential := credentialMaterial{
+		ID: "codex-only", Name: "Codex-only key", ModelOptionsAuthoritative: true,
+		ModelOptions: []beeapi.ModelOption{{
+			ID: "gpt-5.6", Protocols: []string{"openai/responses"}, RecommendedFor: []string{"codex"}, Priority: 100,
+		}},
+	}
+	_, _, err := matchedModel("openclaw", credential)
+	if err == nil || !strings.Contains(err.Error(), "请选择其他 Key") {
+		t.Fatalf("unexpected client restriction result: %v", err)
+	}
+}
+
+func TestCredentialAssignmentRepromptsWhenChosenKeyHasNoCompatibleModel(t *testing.T) {
+	credentials := credentialSelectionFixtures()
+	input := strings.NewReader("1\n3\n")
+	var output bytes.Buffer
+	r := &runner{in: input, reader: bufio.NewReader(input), out: &output, errOut: &output}
+
+	assignments, err := r.selectCredentialAssignments([]string{"codex"}, credentials, nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if assignments["codex"] != "responses-b" {
+		t.Fatalf("assignment = %q, want replacement key", assignments["codex"])
+	}
+	text := output.String()
+	for _, want := range []string{"Chat key 没有可用的 Codex 模型", "请从上方可用 Key 中重新选择"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("replacement prompt missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestCredentialAssignmentReplacesExistingIncompatibleKey(t *testing.T) {
+	credentials := credentialSelectionFixtures()
+	input := strings.NewReader("\n")
+	var output bytes.Buffer
+	r := &runner{in: input, reader: bufio.NewReader(input), out: &output, errOut: &output}
+
+	assignments, err := r.selectCredentialAssignments(
+		[]string{"codex"}, credentials, map[string]string{"codex": "chat-only"}, false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if assignments["codex"] != "responses-a" {
+		t.Fatalf("assignment = %q, want first compatible key", assignments["codex"])
+	}
+	if !strings.Contains(output.String(), "Codex 当前的 Key Chat key 不可用") {
+		t.Fatalf("existing-key replacement notice missing:\n%s", output.String())
+	}
+}
+
+func TestCredentialAssignmentAutoSelectsOnlyCompatibleKey(t *testing.T) {
+	credentials := credentialSelectionFixtures()[:2]
+	var output bytes.Buffer
+	r := &runner{reader: bufio.NewReader(strings.NewReader("")), out: &output, errOut: &output}
+
+	assignments, err := r.selectCredentialAssignments([]string{"codex"}, credentials, nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if assignments["codex"] != "responses-a" {
+		t.Fatalf("assignment = %q, want only compatible key", assignments["codex"])
+	}
+	if !strings.Contains(output.String(), "仅 Responses A 有兼容模型，已自动选择") {
+		t.Fatalf("automatic selection notice missing:\n%s", output.String())
+	}
+}
+
+func credentialSelectionFixtures() []credentialMaterial {
+	return []credentialMaterial{
+		{
+			ID: "chat-only", Name: "Chat key", Prefix: "sk-chat", ModelOptionsAuthoritative: true,
+			Models: []string{"gpt-chat"}, ModelOptions: []beeapi.ModelOption{{
+				ID: "gpt-chat", Protocols: []string{"openai/chat_completions"}, RecommendedFor: []string{"openai_compatible"}, Priority: 100,
+			}},
+		},
+		{
+			ID: "responses-a", Name: "Responses A", Prefix: "sk-a", ModelOptionsAuthoritative: true,
+			Models: []string{"gpt-5.6"}, ModelOptions: []beeapi.ModelOption{{
+				ID: "gpt-5.6", Protocols: []string{"openai/responses"}, RecommendedFor: []string{"codex"}, Priority: 100,
+			}},
+		},
+		{
+			ID: "responses-b", Name: "Responses B", Prefix: "sk-b", ModelOptionsAuthoritative: true,
+			Models: []string{"gpt-5.5"}, ModelOptions: []beeapi.ModelOption{{
+				ID: "gpt-5.5", Protocols: []string{"openai/responses"}, RecommendedFor: []string{"codex"}, Priority: 90,
+			}},
+		},
+	}
+}
+
+func intPointer(value int) *int { return &value }
+
+func TestModelDiscoveryFallsBackOnlyWhenCapabilityEndpointIsUnavailable(t *testing.T) {
+	previousTransport := http.DefaultTransport
+	requests := make([]string, 0, 2)
+	http.DefaultTransport = appRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		requests = append(requests, request.URL.RequestURI())
+		if request.URL.Path == "/api/v1/client/model-options" {
+			return &http.Response{
+				StatusCode: http.StatusNotFound, Header: make(http.Header),
+				Body: io.NopCloser(strings.NewReader(`{"code":404,"message":"not found"}`)), Request: request,
+			}, nil
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK, Header: make(http.Header),
+			Body: io.NopCloser(strings.NewReader(`{"data":[{"id":"gpt-5.5"}]}`)), Request: request,
+		}, nil
+	})
+	t.Cleanup(func() { http.DefaultTransport = previousTransport })
+
+	r := &runner{ctx: context.Background()}
+	discovery, err := r.modelsForCredential("https://beeapi.test", "sk-legacy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if discovery.Authoritative || !reflect.DeepEqual(discovery.Models, []string{"gpt-5.5"}) {
+		t.Fatalf("unexpected fallback discovery: %#v", discovery)
+	}
+	wantRequests := []string{"/api/v1/client/model-options", "/v1/models?include_aliases=false"}
+	if !reflect.DeepEqual(requests, wantRequests) {
+		t.Fatalf("requests = %#v, want %#v", requests, wantRequests)
+	}
+}
+
+func TestModelDiscoveryDoesNotHideCapabilityEndpointAuthErrors(t *testing.T) {
+	previousTransport := http.DefaultTransport
+	requests := 0
+	http.DefaultTransport = appRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		requests++
+		return &http.Response{
+			StatusCode: http.StatusUnauthorized, Header: make(http.Header),
+			Body: io.NopCloser(strings.NewReader(`{"code":401,"message":"invalid key"}`)), Request: request,
+		}, nil
+	})
+	t.Cleanup(func() { http.DefaultTransport = previousTransport })
+
+	r := &runner{ctx: context.Background()}
+	_, err := r.modelsForCredential("https://beeapi.test", "sk-invalid")
+	if err == nil || !strings.Contains(err.Error(), "401") {
+		t.Fatalf("unexpected authentication error: %v", err)
+	}
+	if requests != 1 {
+		t.Fatalf("auth failure unexpectedly fell back to /v1/models: %d requests", requests)
+	}
+}
+
+func TestCredentialModelDiscoverySkipsOneUnusableKeyWithoutStoppingOthers(t *testing.T) {
+	previousTransport := http.DefaultTransport
+	http.DefaultTransport = appRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.Header.Get("Authorization") == "Bearer sk-empty" {
+			return &http.Response{
+				StatusCode: http.StatusOK, Header: make(http.Header),
+				Body: io.NopCloser(strings.NewReader(`{"code":0,"message":"success","data":{"models":[]}}`)), Request: request,
+			}, nil
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK, Header: make(http.Header),
+			Body: io.NopCloser(strings.NewReader(`{"code":0,"message":"success","data":{"models":[{"id":"gpt-5.6","protocols":["openai/responses"],"recommended_for":["codex"],"priority":100}]}}`)), Request: request,
+		}, nil
+	})
+	t.Cleanup(func() { http.DefaultTransport = previousTransport })
+
+	var output bytes.Buffer
+	r := &runner{ctx: context.Background(), out: &output, errOut: &output}
+	credentials, err := r.discoverCredentialModels("https://beeapi.test", []credentialMaterial{
+		{ID: "empty", Name: "无路由 Key", Secret: "sk-empty"},
+		{ID: "usable", Name: "Codex Key", Secret: "sk-usable"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(credentials) != 1 || credentials[0].ID != "usable" || !credentials[0].ModelOptionsAuthoritative {
+		t.Fatalf("unexpected usable credentials: %#v", credentials)
+	}
+	if !strings.Contains(output.String(), "无路由 Key · 已跳过") {
+		t.Fatalf("unusable-key notice missing:\n%s", output.String())
 	}
 }
 

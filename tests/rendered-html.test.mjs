@@ -18,9 +18,11 @@ test("exports the GetBeeAPI product page for static hosting", async () => {
   assert.match(html, /https:\/\/beeapi\.dev/);
   assert.match(html, /网页登录并批准设备/);
   assert.match(html, /直接粘贴 API Key/);
-  assert.match(html, /设备专用 Key/);
-  assert.match(html, /选择 1–10 个/);
-  assert.doesNotMatch(html, /回到 CLI 选择一枚已有 Key/);
+  assert.match(html, /账户当前可用的现有 Key/);
+  assert.match(html, /批准此设备/);
+  assert.match(html, /不创建重复密钥/);
+  assert.doesNotMatch(html, /设备专用 Key/);
+  assert.doesNotMatch(html, /选择 1–10 个/);
   for (const tool of [
     "Claude Code",
     "Claude Desktop",

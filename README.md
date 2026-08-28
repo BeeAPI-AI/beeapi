@@ -3,12 +3,12 @@
 GetBeeAPI 是把 BeeAPI 快速接入现有 AI 工具的跨平台配置器，不是一个新的智能体。首次运行 `beeapi` 时按下面的三步完成设置：
 
 1. 从内置入口开始探测 `/healthz`，再通过可用入口读取 `/api/v1/public/api-endpoints` 并验证官方列表。正常可访问时直接选择最快入口；只有用户选择不可访问的域名时才尝试 Cloudflare IP 优选和受管 Hosts，优选失败则自动回退到已有可用入口继续设置。
-2. 在 BeeAPI 网站授权登录并选择 1–10 个密钥配置。批准后 CLI 一次领取对应的设备专用 Key，并分别读取可用模型；也可直接粘贴单个 API Key 作为兼容回退。
-3. 检测 Claude Code、Claude Desktop（Code 模式）、Codex、Gemini CLI、Grok Build、OpenCode、OpenClaw 与 Hermes，多选目标工具，并为每个工具选择密钥配置与模型；备份原配置后写入，失败自动回滚。
+2. 在 BeeAPI 网站登录、核对并授权当前设备。批准后 CLI 一次读取账户中当前可导出的可用 API Key，再分别获取可用模型；也可直接粘贴单个 API Key 作为兼容回退。
+3. 检测 Claude Code、Claude Desktop（Code 模式）、Codex、Gemini CLI、Grok Build、OpenCode、OpenClaw 与 Hermes，多选目标工具，并为每个工具选择密钥配置与模型；模型默认顺序采用 BeeAPI 的 Key 路由/商家市场优先级，所选 Key 不兼容时会要求更换其他 Key；备份原配置后写入，失败自动回滚。
 
 首次设置完成后，再输入 `beeapi` 会打开带状态摘要的功能主页，可以启动已配置工具、更新配置、切换 Key、管理网络入口或恢复备份，不会重复执行首次向导。
 
-CLI 永远不会询问 BeeAPI 账号密码，也不会读取账户原 API Key 的明文。网站批准后，BeeAPI 为本设备创建可独立撤销的专用 Key；协议见 [设备授权契约](docs/device-authorization.md)。不方便使用网页授权时，可直接使用单 Key 兼容模式。
+CLI 永远不会询问 BeeAPI 账号密码，也不会读取网页登录 Cookie。网页会明确说明授权范围；批准后，BeeAPI 通过一次性领取流程把账户当时可导出的现有 API Key 交给 CLI，不额外创建 Key。协议见 [设备授权契约](docs/device-authorization.md)。不方便使用网页授权时，可直接使用单 Key 兼容模式。
 
 ## 安装
 
@@ -65,5 +65,5 @@ beeapi token print --agent codex 仅向 Codex profile 提供其已分配的 Key
 - CloudflareSpeedTest 只负责 TCP 443 初筛；CLI 会并发复验前 20 个候选的 `/healthz` 实际延迟。全部失败时不会写 Hosts，而是继续使用已探测到的可用域名。
 - Hosts 只写入带 `getbeeapi managed` 标记的区块；写入前备份，可独立移除。
 - 原有工具配置会先做逐文件备份。Codex 使用独立 `beeapi` profile；Grok Build 与 Hermes 使用 GetBeeAPI 专用配置目录，不覆盖各自的官方登录与默认配置。
-- 每个设备凭据独立存储并可分配给不同工具；Codex 通过 `beeapi token print --agent codex` 按工具读取，不把 Key 写进 profile。
+- 每个获准导出的账户 Key 都在本机独立存储并可分配给不同工具；Codex 通过 `beeapi token print --agent codex` 按工具读取，不把 Key 写进 profile。
 - 凭据优先进入系统钥匙串；不可用时退回相互隔离、权限为 `0600` 的本地文件。

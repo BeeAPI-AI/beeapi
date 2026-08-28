@@ -379,11 +379,16 @@ func (c *Client) PollDeviceAuth(ctx context.Context, deviceCode string) (DeviceT
 	return token, err
 }
 
-// CLICredential is a newly-created, device-specific child API key. The
-// approval page chooses the source profiles; the CLI never receives or
-// reveals the user's original API keys.
+// CLICredential is an existing account API key exported after the user
+// approves the device. The legacy device-key fields remain readable so a
+// newer CLI can still consume responses from the v1 device-key rollout.
 type CLICredential struct {
-	CredentialID    string `json:"credential_id"`
+	CredentialID string     `json:"credential_id"`
+	KeyName      string     `json:"key_name"`
+	KeyPrefix    string     `json:"key_prefix"`
+	Status       string     `json:"status"`
+	ExpiresAt    *time.Time `json:"expires_at"`
+	// Legacy device_key_v1 fields.
 	ProfileName     string `json:"profile_name"`
 	SourceKeyPrefix string `json:"source_key_prefix"`
 	DeviceKeyName   string `json:"device_key_name"`
@@ -391,9 +396,20 @@ type CLICredential struct {
 	APIKey          string `json:"api_key"`
 }
 
+type CLICredentialSkip struct {
+	CredentialID string     `json:"credential_id"`
+	KeyName      string     `json:"key_name"`
+	KeyPrefix    string     `json:"key_prefix"`
+	Status       string     `json:"status"`
+	ExpiresAt    *time.Time `json:"expires_at"`
+	Reason       string     `json:"reason"`
+}
+
 type CLICredentialClaimResult struct {
-	Credentials []CLICredential `json:"credentials"`
-	RetryUntil  time.Time       `json:"retry_until"`
+	CredentialMode string              `json:"credential_mode"`
+	Credentials    []CLICredential     `json:"credentials"`
+	Skipped        []CLICredentialSkip `json:"skipped"`
+	RetryUntil     time.Time           `json:"retry_until"`
 }
 
 func (c *Client) ClaimCLICredentials(ctx context.Context) (CLICredentialClaimResult, error) {
@@ -402,7 +418,10 @@ func (c *Client) ClaimCLICredentials(ctx context.Context) (CLICredentialClaimRes
 		return result, err
 	}
 	if len(result.Credentials) == 0 {
-		return result, errors.New("BeeAPI 没有返回已批准的设备凭据")
+		if len(result.Skipped) > 0 {
+			return result, errors.New("BeeAPI 账户中没有可导出的可用 API Key")
+		}
+		return result, errors.New("BeeAPI 没有返回可用 API Key")
 	}
 	for _, credential := range result.Credentials {
 		if strings.TrimSpace(credential.CredentialID) == "" || strings.TrimSpace(credential.APIKey) == "" {
@@ -414,6 +433,45 @@ func (c *Client) ClaimCLICredentials(ctx context.Context) (CLICredentialClaimRes
 
 type Model struct {
 	ID string `json:"id"`
+}
+
+// ModelOption is BeeAPI's API-key-scoped capability view for setup clients.
+// It intentionally stays separate from the OpenAI-compatible /v1/models
+// response, whose schema cannot describe the wire protocols a route supports.
+type ModelOption struct {
+	ID                  string   `json:"id"`
+	Protocols           []string `json:"protocols"`
+	Capabilities        []string `json:"capabilities"`
+	RecommendedFor      []string `json:"recommended_for"`
+	Priority            int      `json:"priority"`
+	ContextWindowTokens *int     `json:"context_window_tokens,omitempty"`
+	MaxOutputTokens     *int     `json:"max_output_tokens,omitempty"`
+}
+
+func (c *Client) ModelOptions(ctx context.Context, apiKey string) ([]ModelOption, error) {
+	scoped := New(c.BaseURL)
+	scoped.HTTP = c.HTTP
+	scoped.Token = strings.TrimSpace(apiKey)
+	if scoped.Token == "" {
+		return nil, errors.New("API Key 不能为空")
+	}
+	var data struct {
+		Models []ModelOption `json:"models"`
+	}
+	if err := scoped.request(ctx, http.MethodGet, "/client/model-options", nil, &data); err != nil {
+		return nil, err
+	}
+	seen := make(map[string]bool, len(data.Models))
+	options := make([]ModelOption, 0, len(data.Models))
+	for _, option := range data.Models {
+		option.ID = strings.TrimSpace(option.ID)
+		if option.ID == "" || seen[option.ID] {
+			continue
+		}
+		seen[option.ID] = true
+		options = append(options, option)
+	}
+	return options, nil
 }
 
 func (c *Client) Models(ctx context.Context, apiKey string) ([]string, error) {
