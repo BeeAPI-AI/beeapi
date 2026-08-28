@@ -8,6 +8,17 @@ const localBindingConfig = {
   main: "./worker/index.ts",
   compatibility_date: "2026-08-28",
   compatibility_flags: ["nodejs_compat"],
+  routes: [
+    {
+      pattern: "getbeeapi.com/releases/*",
+      zone_name: "getbeeapi.com",
+    },
+  ],
+  assets: {
+    // Release mirrors are dynamic Worker routes. Without this rule the
+    // static asset layer returns its own 404 before the Worker can proxy.
+    run_worker_first: ["/releases/*"],
+  },
   d1_databases: [],
   r2_buckets: [],
 };

@@ -17,10 +17,12 @@ test("release cache only proxies fixed BeeAPI artifacts", () => {
 });
 
 test("release cache supports fixed CFST metadata and artifacts", () => {
-  assert.equal(
-    resolveReleaseRoute(new URL("https://getbeeapi.com/releases/cfst/latest.json"))?.upstream,
-    "https://api.github.com/repos/XIU2/CloudflareSpeedTest/releases/latest",
-  );
+  const latest = resolveReleaseRoute(new URL("https://getbeeapi.com/releases/cfst/latest.json"));
+  assert.equal(latest?.upstream, "https://api.github.com/repos/XIU2/CloudflareSpeedTest/releases/latest");
+  const fallback = JSON.parse(latest?.fallback?.body ?? "null");
+  assert.equal(fallback.tag_name, "v2.3.5");
+  assert.equal(fallback.assets.length, 6);
+  assert.match(fallback.assets[2].digest, /^sha256:[a-f0-9]{64}$/);
   assert.equal(
     resolveReleaseRoute(new URL("https://getbeeapi.com/releases/cfst/v2.3.5/cfst_linux_amd64.tar.gz"))?.upstream,
     "https://github.com/XIU2/CloudflareSpeedTest/releases/download/v2.3.5/cfst_linux_amd64.tar.gz",

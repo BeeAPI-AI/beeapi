@@ -37,6 +37,21 @@ async function fetchRelease(request: Request, ctx: ExecutionContext): Promise<Re
   const cached = await caches.default.match(cacheKey);
   if (cached) return cached;
 
+  const fallbackResponse = (): Response | null => {
+    if (!route.fallback) return null;
+    const response = new Response(route.fallback.body, {
+      status: 200,
+      headers: {
+        "Cache-Control": `public, max-age=${route.cacheSeconds}`,
+        "Content-Type": route.fallback.contentType,
+        "X-Content-Type-Options": "nosniff",
+        "X-GetBeeAPI-Fallback": "1",
+      },
+    });
+    ctx.waitUntil(caches.default.put(cacheKey, response.clone()));
+    return response;
+  };
+
   let upstream: Response;
   try {
     upstream = await fetch(route.upstream, {
@@ -48,11 +63,15 @@ async function fetchRelease(request: Request, ctx: ExecutionContext): Promise<Re
     });
   } catch (error) {
     console.error(JSON.stringify({ event: "release_proxy_fetch_failed", upstream: route.upstream, error: String(error) }));
+    const fallback = fallbackResponse();
+    if (fallback) return fallback;
     return new Response("Release upstream unavailable", { status: 502, headers: { "Cache-Control": "no-store" } });
   }
 
   if (!upstream.ok || !upstream.body) {
     console.error(JSON.stringify({ event: "release_proxy_bad_status", upstream: route.upstream, status: upstream.status }));
+    const fallback = fallbackResponse();
+    if (fallback) return fallback;
     return new Response("Release upstream error", { status: upstream.status, headers: { "Cache-Control": "no-store" } });
   }
 
