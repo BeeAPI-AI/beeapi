@@ -64,13 +64,15 @@ CLI 内置 `beeapi.ai` 与 `beeapi.dev` 作为引导入口。它先并发请求�
 | Claude Code | `claude` 或 `~/.claude/settings.json` | 深度合并 `settings.json` 的 BeeAPI 环境变量 |
 | Claude Desktop（Code） | Claude Desktop 应用或本地配置 | 使用与 Claude Code 共享的 `~/.claude/settings.json`；`beeapi run claude-desktop` 通过官方深链打开 Code 模式 |
 | Codex | `codex` 或 `~/.codex/config.toml` | 新建 `~/.codex/beeapi.config.toml` profile，使用 `beeapi token print --agent codex` 按工具取凭据 |
-| Gemini CLI | `gemini` 或 `~/.gemini/settings.json` | 写受保护 env 文件，由 `beeapi run gemini` 注入 |
-| Grok Build | `grok` 或 `~/.grok/config.toml` | 写 GetBeeAPI 专用 `GROK_HOME`，由 `beeapi run grok` 注入凭据并启动 |
+| Gemini CLI | `gemini` 或 `~/.gemini/settings.json` | 写受保护 env 文件；受管 `gemini` Shell 入口在运行时注入 |
+| Grok Build | `grok` 或 `~/.grok/config.toml` | 写 GetBeeAPI 专用 `GROK_HOME`；受管 `grok` Shell 入口注入凭据并启动 |
 | OpenCode | `opencode` 或本地配置 | 深度合并 BeeAPI provider |
 | OpenClaw | `openclaw` 或本地配置 | 深度合并 BeeAPI provider 与默认模型 |
-| Hermes | `hermes` 或 `~/.hermes/config.yaml` | 写 GetBeeAPI 专用 `HERMES_HOME` custom provider，由 `beeapi run hermes` 注入凭据并启动 |
+| Hermes | `hermes` 或 `~/.hermes/config.yaml` | 写 GetBeeAPI 专用 `HERMES_HOME` custom provider；受管 `hermes` Shell 入口注入凭据并启动 |
 
-每个工具可以选择不同的账户现有 API Key 及该 Key 可用的模型。CLI 先按服务端返回的协议与客户端适配性筛选，再直接采用服务端 `priority`：API Key 路由优先级是第一层，同一路由内沿用 BeeAPI 商家市场的模型排列。CLI 不再用模型名、上下文长度或本地偏好覆盖该顺序；只有旧服务端缺少专用能力接口时才回退到默认候选。当前或用户刚选的 Key 没有该工具的兼容模型时，CLI 会列出其他兼容 Key 并要求重选；只剩一个候选时自动切换，全部不兼容才停止。Claude Code 与 Claude Desktop Code 因共享同一设置文件，必须共用 Key 与模型。所有目标文件在第一次写入前归入同一个备份清单；任一写入失败就回滚整个批次。
+每个工具可以选择不同的账户现有 API Key 及该 Key 可用的模型。CLI 先按服务端返回的协议与客户端适配性筛选，再把服务端 `priority` 最高项标为默认：API Key 路由优先级是第一层，同一路由内沿用 BeeAPI 商家市场的模型排列。交互模式始终先列出 API Key（不兼容项保留展示但不可选），再列出所选 Key 的兼容模型，由用户分别确认；首次设置的 `--yes` 或命令行重配置等非交互路径才自动采用默认项。旧服务端缺少专用能力接口时才回退到基础模型列表。Claude Code 与 Claude Desktop Code 因共享同一设置文件，必须共用 Key 与模型。所有目标配置文件与受管直接启动脚本在第一次写入前归入同一个备份清单；任一写入失败就回滚整个批次。
+
+Codex 的 BeeAPI 配置保持在独立的 `~/.codex/beeapi.config.toml`，不覆盖用户原有的 ChatGPT 登录与基础配置。由于 Codex 的独立 profile 需要 `--profile` 才会叠加，GetBeeAPI 会在 Bash、Zsh、POSIX Shell、Fish 或 PowerShell 的启动文件中加入只负责加载受管命令脚本的区块，使用户仍然直接输入 `codex`、`gemini`、`grok` 或 `hermes`。这些函数内部调用 `beeapi run`；原工具二进制不被替换，区块幂等且不包含 API Key。
 
 Claude Desktop 的适配范围是其中的 Code 模式：Anthropic 官方说明 Code 模式与 Claude Code 共享设置，因此能够使用 BeeAPI 配置。普通 Claude 聊天仍由 Anthropic 账户提供模型，不支持用本地配置替换底层 API，GetBeeAPI 不会把 MCP 连接伪装成模型替换。
 

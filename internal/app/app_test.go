@@ -487,7 +487,7 @@ func TestCredentialAssignmentRepromptsWhenChosenKeyHasNoCompatibleModel(t *testi
 		t.Fatalf("assignment = %q, want replacement key", assignments["codex"])
 	}
 	text := output.String()
-	for _, want := range []string{"Chat key 没有可用的 Codex 模型", "请从上方可用 Key 中重新选择"} {
+	for _, want := range []string{"× Chat key", "Chat key 不能用于 Codex", "请重新选择带 ✓ 的 API Key"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("replacement prompt missing %q:\n%s", want, text)
 		}
@@ -514,7 +514,7 @@ func TestCredentialAssignmentReplacesExistingIncompatibleKey(t *testing.T) {
 	}
 }
 
-func TestCredentialAssignmentAutoSelectsOnlyCompatibleKey(t *testing.T) {
+func TestCredentialAssignmentStillConfirmsOnlyCompatibleKey(t *testing.T) {
 	credentials := credentialSelectionFixtures()[:2]
 	var output bytes.Buffer
 	r := &runner{reader: bufio.NewReader(strings.NewReader("")), out: &output, errOut: &output}
@@ -526,8 +526,50 @@ func TestCredentialAssignmentAutoSelectsOnlyCompatibleKey(t *testing.T) {
 	if assignments["codex"] != "responses-a" {
 		t.Fatalf("assignment = %q, want only compatible key", assignments["codex"])
 	}
-	if !strings.Contains(output.String(), "仅 Responses A 有兼容模型，已自动选择") {
-		t.Fatalf("automatic selection notice missing:\n%s", output.String())
+	text := output.String()
+	for _, want := range []string{"Codex · 选择 API Key", "2. ✓ Responses A", "请选择 API Key [2]"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("explicit key confirmation missing %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "已自动选择") {
+		t.Fatalf("interactive flow unexpectedly auto-selected the only compatible key:\n%s", text)
+	}
+}
+
+func TestInteractiveModelSelectionListsChoicesAndUsesSelectedNumber(t *testing.T) {
+	credential := credentialMaterial{
+		ID: "responses", Name: "OpenAI-Plus key", Models: []string{"gpt-5.5", "gpt-5.6-sol"},
+		ModelOptionsAuthoritative: true,
+		ModelOptions: []beeapi.ModelOption{
+			{ID: "gpt-5.5", Protocols: []string{"openai/responses"}, RecommendedFor: []string{"codex"}, Priority: 90},
+			{ID: "gpt-5.6-sol", Protocols: []string{"openai/responses"}, RecommendedFor: []string{"codex"}, Priority: 100},
+		},
+	}
+	input := strings.NewReader("2\n")
+	var output bytes.Buffer
+	r := &runner{in: input, reader: bufio.NewReader(input), out: &output, errOut: &output}
+
+	models, err := r.selectModelsForAssignments(
+		[]string{"codex"}, []credentialMaterial{credential}, map[string]string{"codex": "responses"}, false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if models["codex"] != "gpt-5.5" {
+		t.Fatalf("selected model = %q, want numbered second choice", models["codex"])
+	}
+	text := output.String()
+	for _, want := range []string{
+		"Codex · OpenAI-Plus key · 选择模型",
+		"1. gpt-5.6-sol · BeeAPI 推荐",
+		"2. gpt-5.5",
+		"请选择模型编号或名称 [1]",
+		"✓ Codex 使用 OpenAI-Plus key · gpt-5.5",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("explicit model selection missing %q:\n%s", want, text)
+		}
 	}
 }
 

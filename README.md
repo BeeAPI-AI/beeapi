@@ -49,12 +49,16 @@ beeapi network status          检查两个内置入口
 beeapi network optimize        优选并验证 Cloudflare IP
 beeapi network restore         删除受管 Hosts 记录
 beeapi rollback latest         恢复最近一次配置备份
-beeapi run codex               用 BeeAPI profile 启动 Codex
-beeapi run grok                用独立 GROK_HOME 启动 Grok Build
-beeapi run hermes              用独立 HERMES_HOME 启动 Hermes
+codex                          直接用已选 BeeAPI Key 与模型启动 Codex
+gemini                         直接启动 Gemini CLI
+grok                           直接启动 Grok Build
+hermes                         直接启动 Hermes
+beeapi run codex               兼容/排障入口；通常无需使用
 beeapi run claude-desktop      打开 Claude Desktop 的 Code 模式
 beeapi token print --agent codex 仅向 Codex profile 提供其已分配的 Key
 ```
+
+配置完成后，CLI 会为需要运行时注入的工具安装一小段受管 Shell 入口；新开终端即可继续使用工具原本的命令。`beeapi run <工具>` 仍保留为兼容和排障入口。Claude Code、OpenCode 与 OpenClaw 使用各自的原生配置文件，无需命令包装。
 
 详细流程见 [架构说明](docs/architecture.md)。
 

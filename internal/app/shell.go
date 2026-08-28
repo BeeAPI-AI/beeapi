@@ -224,7 +224,7 @@ func (r *runner) configureInteractive() error {
 	}
 	result, err := configurator.Apply(r.store, configurator.Options{
 		Endpoint: cfg.Endpoint, APIKeys: apiKeys, Models: selectedModels,
-		Agents: agents, BinaryPath: binaryPath,
+		Agents: agents, BinaryPath: binaryPath, DirectLaunch: true,
 	})
 	if err != nil {
 		return err
@@ -300,7 +300,7 @@ func (r *runner) reconnect() error {
 		}
 		result, applyErr := configurator.Apply(r.store, configurator.Options{
 			Endpoint: endpoint, APIKeys: apiKeys, Models: selectedModels,
-			Agents: cfg.Agents, BinaryPath: cfg.BinaryPath,
+			Agents: cfg.Agents, BinaryPath: cfg.BinaryPath, DirectLaunch: true,
 		})
 		if applyErr != nil {
 			return applyErr

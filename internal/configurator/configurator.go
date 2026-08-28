@@ -32,12 +32,17 @@ type Options struct {
 	Models     map[string]string
 	Agents     []string
 	BinaryPath string
+	// DirectLaunch installs managed shell functions for adapters that need
+	// runtime credentials or an isolated profile. The original executables and
+	// their native configuration remain untouched.
+	DirectLaunch bool
 }
 
 type Result struct {
-	BackupID string
-	Files    []string
-	Hints    []string
+	BackupID     string
+	Files        []string
+	Hints        []string
+	ShellProfile string
 }
 
 func Apply(store *state.Store, options Options) (Result, error) {
@@ -75,6 +80,14 @@ func Apply(store *state.Store, options Options) (Result, error) {
 		shared[path] = struct{ key, model string }{key: key, model: model}
 	}
 	paths := targetPaths(home, agents)
+	var integration shellIntegration
+	if options.DirectLaunch {
+		integration, err = prepareShellIntegration(store, home)
+		if err != nil {
+			return Result{}, fmt.Errorf("准备直接启动入口: %w", err)
+		}
+		paths = append(paths, integration.CommandsPath)
+	}
 	backup, err := store.CreateBackup(paths)
 	if err != nil {
 		return Result{}, fmt.Errorf("创建配置备份: %w", err)
@@ -84,7 +97,7 @@ func Apply(store *state.Store, options Options) (Result, error) {
 	for _, agent := range agents {
 		path := pathForAgent(home, agent)
 		if written[path] {
-			appendHint(&result, agent)
+			appendHint(&result, agent, options.DirectLaunch)
 			continue
 		}
 		if err := writeAgent(path, agent, options); err != nil {
@@ -93,23 +106,51 @@ func Apply(store *state.Store, options Options) (Result, error) {
 		}
 		written[path] = true
 		result.Files = append(result.Files, path)
-		appendHint(&result, agent)
+		appendHint(&result, agent, options.DirectLaunch)
+	}
+	if options.DirectLaunch {
+		if err := installDirectLaunch(integration, agents); err != nil {
+			_, _ = store.Rollback(backup.ID)
+			return Result{}, fmt.Errorf("安装直接启动入口失败（已自动回滚工具配置）: %w", err)
+		}
+		result.Files = append(result.Files, integration.CommandsPath)
+		if len(directLaunchAgents(agents)) > 0 {
+			result.ShellProfile = integration.ProfilePath
+			result.Hints = append(result.Hints, fmt.Sprintf("直接启动命令已写入 %s；新终端生效", integration.ProfilePath))
+			result.Hints = append(result.Hints, "当前终端立即启用: "+shellReloadCommand(integration))
+		}
 	}
 	return result, nil
 }
 
-func appendHint(result *Result, agent string) {
+func appendHint(result *Result, agent string, directLaunch bool) {
 	switch agent {
 	case "claude-desktop":
 		result.Hints = append(result.Hints, "Claude Desktop: 打开 Code 标签页（与 Claude Code 共享配置）")
 	case "codex":
-		result.Hints = append(result.Hints, "Codex: codex --profile beeapi（或 beeapi run codex）")
+		if directLaunch {
+			result.Hints = append(result.Hints, "Codex: codex")
+		} else {
+			result.Hints = append(result.Hints, "Codex: codex --profile beeapi（或 beeapi run codex）")
+		}
 	case "gemini":
-		result.Hints = append(result.Hints, "Gemini CLI: beeapi run gemini")
+		if directLaunch {
+			result.Hints = append(result.Hints, "Gemini CLI: gemini")
+		} else {
+			result.Hints = append(result.Hints, "Gemini CLI: beeapi run gemini")
+		}
 	case "grok":
-		result.Hints = append(result.Hints, "Grok Build: beeapi run grok")
+		if directLaunch {
+			result.Hints = append(result.Hints, "Grok Build: grok")
+		} else {
+			result.Hints = append(result.Hints, "Grok Build: beeapi run grok")
+		}
 	case "hermes":
-		result.Hints = append(result.Hints, "Hermes: beeapi run hermes")
+		if directLaunch {
+			result.Hints = append(result.Hints, "Hermes: hermes")
+		} else {
+			result.Hints = append(result.Hints, "Hermes: beeapi run hermes")
+		}
 	}
 }
 
@@ -224,13 +265,13 @@ timeout_ms = 5000
 `
 		return secureWrite(path, []byte(content))
 	case "gemini":
-		content := "# Managed by GetBeeAPI; use with: beeapi run gemini\n" +
+		content := "# Managed by GetBeeAPI; loaded by the managed gemini command\n" +
 			"GOOGLE_GEMINI_BASE_URL=" + shellQuote(options.Endpoint) + "\n" +
 			"GEMINI_API_KEY=" + shellQuote(apiKey) + "\n" +
 			"GEMINI_MODEL=" + shellQuote(model) + "\n"
 		return secureWrite(path, []byte(content))
 	case "grok":
-		content := `# Managed by GetBeeAPI; use with: beeapi run grok
+		content := `# Managed by GetBeeAPI; loaded by the managed grok command
 [model.beeapi]
 model = ` + strconv.Quote(model) + `
 base_url = ` + strconv.Quote(options.Endpoint+"/v1") + `
@@ -274,7 +315,7 @@ default = "beeapi"
 			},
 		})
 	case "hermes":
-		content := "# Managed by GetBeeAPI; use with: beeapi run hermes\n" +
+		content := "# Managed by GetBeeAPI; loaded by the managed hermes command\n" +
 			"model:\n" +
 			"  default: " + strconv.Quote(model) + "\n" +
 			"  provider: custom\n" +
