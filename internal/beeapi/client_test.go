@@ -35,6 +35,46 @@ func TestModelsDeduplicatesAndRanks(t *testing.T) {
 	}
 }
 
+func TestUsageUsesAPIKeyAndDecodesWalletStatus(t *testing.T) {
+	client := New("https://beeapi.test")
+	client.HTTP = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/usage" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer sk-usage-secret" {
+			t.Fatalf("unexpected authorization header: %q", got)
+		}
+		body := `{"is_active":true,"isValid":true,"balance":12.3456,"remaining":12.3456,"currency":"USD","unit":"USD","key_id":7,"key_name":"Coding","key_prefix":"sk-live","plan_name":"OpenAI Plus"}`
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewBufferString(body)), Request: r}, nil
+	})}
+
+	usage, err := client.Usage(context.Background(), " sk-usage-secret ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !usage.IsValid || !usage.IsActive || usage.Balance != 12.3456 || usage.KeyName != "Coding" || usage.PlanName != "OpenAI Plus" {
+		t.Fatalf("unexpected usage response: %#v", usage)
+	}
+}
+
+func TestUsageReturnsStructuredAPIError(t *testing.T) {
+	client := New("https://beeapi.test")
+	client.HTTP = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusUnauthorized,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(bytes.NewBufferString(`{"error":{"message":"invalid api key"}}`)),
+			Request:    r,
+		}, nil
+	})}
+
+	_, err := client.Usage(context.Background(), "sk-invalid")
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusUnauthorized || apiErr.Message != "invalid api key" {
+		t.Fatalf("unexpected usage error: %#v", err)
+	}
+}
+
 func TestModelOptionsUsesBeeAPIEnvelopeAndAPIKeyAuth(t *testing.T) {
 	client := New("https://beeapi.test")
 	client.HTTP = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {

@@ -204,6 +204,7 @@ func TestRunEnvironmentsDoNotOverrideNativeConfigHomes(t *testing.T) {
 func TestRunWithoutArgumentsOpensHomeAfterInitialSetup(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("GETBEE_HOME", home)
+	t.Setenv("BEEAPI_LANG", "zh-CN")
 	store := &state.Store{Dir: home}
 	if err := store.SaveConfig(state.Config{
 		Endpoint:          "https://beeapi.dev",
@@ -219,13 +220,23 @@ func TestRunWithoutArgumentsOpensHomeAfterInitialSetup(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := output.String()
-	for _, want := range []string{"____", "BeeAPI CLI v0-test", "欢迎回来", "启动已配置的 AI 工具", "配置或更新 AI 工具", "已退出 BeeAPI CLI"} {
+	for _, want := range []string{"____", "BeeAPI CLI v0-test", "当前方案  默认配置", "快速切换配置方案", "密钥与余额", "启动已配置的 AI 工具", "已退出 BeeAPI CLI"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("returning-user shell is missing %q:\n%s", want, text)
 		}
 	}
-	if strings.Contains(text, "\n首次设置 ·") || strings.Contains(text, "[1/3] 检测 BeeAPI") {
+	if strings.Contains(text, "AI 工具配置中心") || strings.Contains(text, "欢迎回来") {
+		t.Fatalf("legacy shell title still appears:\n%s", text)
+	}
+	if strings.Contains(text, "\n首次设置 ·") || strings.Contains(text, "[1/3] 检测 BeeAPI") || strings.Contains(text, "Choose your language / 选择语言") {
 		t.Fatalf("returning user unexpectedly entered first-run setup:\n%s", text)
+	}
+	saved, err := store.LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Language != languageChinese {
+		t.Fatalf("migrated language = %q, want %q", saved.Language, languageChinese)
 	}
 }
 
@@ -247,18 +258,103 @@ func TestRunWithoutArgumentsStartsThreeStepGuideOnlyWhenUninitialized(t *testing
 	t.Cleanup(func() { http.DefaultTransport = previousTransport })
 
 	var output bytes.Buffer
-	err := Run(context.Background(), nil, "v0-test", strings.NewReader("\n2\n\n"), &output, &output)
+	err := Run(context.Background(), nil, "v0-test", strings.NewReader("\n\n2\n\n"), &output, &output)
 	if err == nil || !strings.Contains(err.Error(), "API Key 不能为空") {
 		t.Fatalf("first setup should stop on the intentionally empty fallback key, got %v", err)
 	}
 	text := output.String()
-	for _, want := range []string{"BeeAPI CLI v0-test", "首次设置", "[1/3] 检测 BeeAPI", "[2/3] 连接 BeeAPI"} {
+	for _, want := range []string{"BeeAPI CLI v0-test", "Choose your language / 选择语言", "首次设置", "[1/3] 检测 BeeAPI", "[2/3] 连接 BeeAPI"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("first-run guide is missing %q:\n%s", want, text)
 		}
 	}
 	if strings.Contains(text, "欢迎回来") {
 		t.Fatalf("uninitialized user unexpectedly entered the daily shell:\n%s", text)
+	}
+}
+
+func TestFirstRunEnglishLanguageChoiceIsPersistedBeforeSetup(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("GETBEE_HOME", home)
+	previousTransport := http.DefaultTransport
+	http.DefaultTransport = appRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		body := `{"status":"ok"}`
+		if request.URL.Path == "/api/v1/public/api-endpoints" {
+			body = `{"code":0,"message":"success","data":{"items":[]}}`
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    request,
+		}, nil
+	})
+	t.Cleanup(func() { http.DefaultTransport = previousTransport })
+
+	var output bytes.Buffer
+	err := Run(context.Background(), nil, "v0-test", strings.NewReader("2\n\n2\n\n"), &output, &output)
+	if err == nil || !strings.Contains(err.Error(), "API Key is required") {
+		t.Fatalf("English setup should stop on the intentionally empty fallback key, got %v", err)
+	}
+	text := output.String()
+	for _, want := range []string{"Choose your language / 选择语言", "First-time setup", "[1/3] Check official BeeAPI endpoints", "[2/3] Connect BeeAPI"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("English first-run guide is missing %q:\n%s", want, text)
+		}
+	}
+	store := &state.Store{Dir: home}
+	cfg, loadErr := store.LoadConfig()
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if cfg.Language != languageEnglish {
+		t.Fatalf("saved language = %q, want %q", cfg.Language, languageEnglish)
+	}
+}
+
+func TestSavedEnglishLanguageOpensEnglishHomeWithoutPrompt(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("GETBEE_HOME", home)
+	store := &state.Store{Dir: home}
+	if err := store.SaveConfig(state.Config{
+		Language:          languageEnglish,
+		Endpoint:          "https://beeapi.dev",
+		CredentialBackend: "protected-file",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var output bytes.Buffer
+	if err := Run(context.Background(), nil, "v0-test", strings.NewReader("0\n"), &output, &output); err != nil {
+		t.Fatal(err)
+	}
+	text := output.String()
+	for _, want := range []string{"Profile", "Quick-switch profile", "API Keys and balance", "Exited BeeAPI CLI"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("English home is missing %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "Choose your language / 选择语言") || strings.Contains(text, "快速切换配置方案") {
+		t.Fatalf("saved English home unexpectedly prompted or used Chinese menu text:\n%s", text)
+	}
+}
+
+func TestLanguageCommandPersistsSelectionAndLocalizesHelp(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("GETBEE_HOME", home)
+	var output bytes.Buffer
+	if err := Run(context.Background(), []string{"language", "en"}, "v0-test", strings.NewReader(""), &output, &output); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "Language changed to English") {
+		t.Fatalf("language confirmation is not English:\n%s", output.String())
+	}
+	output.Reset()
+	if err := Run(context.Background(), []string{"help"}, "v0-test", strings.NewReader(""), &output, &output); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "quickly configure BeeAPI") || strings.Contains(output.String(), "为现有 AI 工具") {
+		t.Fatalf("saved language was not used for help:\n%s", output.String())
 	}
 }
 
@@ -568,6 +664,34 @@ func TestInteractiveModelSelectionListsChoicesAndUsesSelectedNumber(t *testing.T
 		if !strings.Contains(text, want) {
 			t.Fatalf("explicit model selection missing %q:\n%s", want, text)
 		}
+	}
+}
+
+func TestEditingProfileKeepsCurrentCompatibleModelAsDefault(t *testing.T) {
+	credential := credentialMaterial{
+		ID: "responses", Name: "Coding", Models: []string{"gpt-5.5", "gpt-5.6-sol"},
+		ModelOptionsAuthoritative: true,
+		ModelOptions: []beeapi.ModelOption{
+			{ID: "gpt-5.5", Protocols: []string{"openai/responses"}, RecommendedFor: []string{"codex"}, Priority: 90},
+			{ID: "gpt-5.6-sol", Protocols: []string{"openai/responses"}, RecommendedFor: []string{"codex"}, Priority: 100},
+		},
+	}
+	input := strings.NewReader("\n")
+	var output bytes.Buffer
+	r := &runner{in: input, reader: bufio.NewReader(input), out: &output, errOut: &output}
+	models, err := r.selectModelsForAssignmentsWithDefaults(
+		[]string{"codex"}, []credentialMaterial{credential}, map[string]string{"codex": "responses"},
+		map[string]string{"codex": "gpt-5.5"}, false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if models["codex"] != "gpt-5.5" {
+		t.Fatalf("selected model = %q, want current compatible model", models["codex"])
+	}
+	text := output.String()
+	if !strings.Contains(text, "1. gpt-5.5 · 当前") || !strings.Contains(text, "gpt-5.6-sol · BeeAPI 推荐") {
+		t.Fatalf("current/recommended model labels are missing:\n%s", text)
 	}
 }
 

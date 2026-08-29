@@ -1,9 +1,11 @@
 package state
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -108,6 +110,7 @@ func TestInitializedAcceptsMultiCredentialConfig(t *testing.T) {
 func TestSaveConfigRecordsLifecycleMetadata(t *testing.T) {
 	store := &Store{Dir: t.TempDir()}
 	if err := store.SaveConfig(Config{
+		Language:          "en",
 		Endpoint:          "https://beeapi.ai",
 		CredentialBackend: "protected-file",
 	}); err != nil {
@@ -123,5 +126,42 @@ func TestSaveConfigRecordsLifecycleMetadata(t *testing.T) {
 	}
 	if saved.SchemaVersion != CurrentSchemaVersion || saved.InitializedAt.IsZero() || saved.UpdatedAt.IsZero() {
 		t.Fatalf("missing lifecycle metadata: %#v", saved)
+	}
+	if saved.Language != "en" {
+		t.Fatalf("language = %q, want en", saved.Language)
+	}
+}
+
+func TestSaveConfigPersistsNamedProfilesWithoutSecrets(t *testing.T) {
+	store := &Store{Dir: t.TempDir()}
+	want := Profile{
+		ID: "profile-work", Name: "工作开发", Endpoint: "https://beeapi.dev",
+		Agents: []string{"codex"}, Models: map[string]string{"codex": "gpt-5.6-sol"},
+		AgentCredentials: map[string]string{"codex": "credential-one"},
+	}
+	if err := store.SaveConfig(Config{
+		Endpoint: "https://beeapi.dev",
+		Credentials: []Credential{{
+			ID: "credential-one", Name: "Coding", Backend: "protected-file",
+		}},
+		Profiles:       []Profile{want},
+		ActiveProfile:  want.ID,
+		ActiveProfiles: map[string]string{"codex": want.ID},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := store.LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.SchemaVersion != CurrentSchemaVersion || !reflect.DeepEqual(saved.Profiles, []Profile{want}) {
+		t.Fatalf("unexpected saved profiles: %#v", saved)
+	}
+	raw, err := os.ReadFile(store.ConfigPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) == 0 || bytes.Contains(raw, []byte("sk-secret")) {
+		t.Fatalf("config unexpectedly contains a secret: %s", raw)
 	}
 }

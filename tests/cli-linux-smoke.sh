@@ -85,11 +85,27 @@ test -x "$work_dir/checksum-fallback-home/.local/bin/beeapi"
 config_home="$work_dir/config"
 mkdir -p "$config_home"
 printf '%s\n' '{"schema_version":1,"endpoint":"https://beeapi.dev","key_name":"smoke","agents":["codex"],"credential_backend":"protected-file"}' > "$config_home/config.json"
-printf '0\n' | env GETBEE_HOME="$config_home" "$work_dir/home/.local/bin/beeapi" > "$work_dir/home-output.txt"
+printf '0\n' | env BEEAPI_LANG=zh-CN GETBEE_HOME="$config_home" "$work_dir/home/.local/bin/beeapi" > "$work_dir/home-output.txt"
 grep -Fq 'BeeAPI CLI' "$work_dir/home-output.txt"
-grep -Fq '欢迎回来' "$work_dir/home-output.txt"
+grep -Fq '当前方案  默认配置' "$work_dir/home-output.txt"
+grep -Fq '快速切换配置方案' "$work_dir/home-output.txt"
+if grep -Fq 'AI 工具配置中心' "$work_dir/home-output.txt"; then
+  printf 'Legacy shell title unexpectedly remains\n' >&2
+  exit 1
+fi
 if grep -Fq '[1/3] 检测 BeeAPI' "$work_dir/home-output.txt"; then
   printf 'Returning user unexpectedly entered first setup\n' >&2
+  exit 1
+fi
+
+english_config_home="$work_dir/config-en"
+mkdir -p "$english_config_home"
+printf '%s\n' '{"schema_version":4,"language":"en","endpoint":"https://beeapi.dev","key_name":"smoke","agents":["codex"],"credential_backend":"protected-file"}' > "$english_config_home/config.json"
+printf '0\n' | env GETBEE_HOME="$english_config_home" "$work_dir/home/.local/bin/beeapi" > "$work_dir/home-output-en.txt"
+grep -Fq 'Quick-switch profile' "$work_dir/home-output-en.txt"
+grep -Fq 'Exited BeeAPI CLI' "$work_dir/home-output-en.txt"
+if grep -Fq 'Choose your language / 选择语言' "$work_dir/home-output-en.txt"; then
+  printf 'Returning English user unexpectedly entered language selection\n' >&2
   exit 1
 fi
 

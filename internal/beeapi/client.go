@@ -435,6 +435,83 @@ type Model struct {
 	ID string `json:"id"`
 }
 
+// Usage is the API-key-scoped wallet and key status returned by /v1/usage.
+// Balance is account-level while the validity and metadata fields describe the
+// specific API key used for the request.
+type Usage struct {
+	IsActive       bool    `json:"is_active"`
+	IsValid        bool    `json:"isValid"`
+	InvalidMessage string  `json:"invalid_message,omitempty"`
+	Balance        float64 `json:"balance"`
+	Remaining      float64 `json:"remaining"`
+	Total          float64 `json:"total,omitempty"`
+	Used           float64 `json:"used,omitempty"`
+	Currency       string  `json:"currency"`
+	Unit           string  `json:"unit"`
+	KeyID          int     `json:"key_id"`
+	KeyName        string  `json:"key_name,omitempty"`
+	KeyPrefix      string  `json:"key_prefix"`
+	PlanName       string  `json:"plan_name,omitempty"`
+	ExpiresAt      string  `json:"expires_at,omitempty"`
+}
+
+func (c *Client) Usage(ctx context.Context, apiKey string) (Usage, error) {
+	var usage Usage
+	apiKey = strings.TrimSpace(apiKey)
+	if apiKey == "" {
+		return usage, errors.New("API Key 不能为空")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/v1/usage", nil)
+	if err != nil {
+		return usage, err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("User-Agent", "beeapi-cli/1")
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return usage, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return usage, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		message := strings.TrimSpace(string(body))
+		var failure struct {
+			Error struct {
+				Message string `json:"message"`
+			} `json:"error"`
+			Message string `json:"message"`
+		}
+		if json.Unmarshal(body, &failure) == nil {
+			if failure.Error.Message != "" {
+				message = failure.Error.Message
+			} else if failure.Message != "" {
+				message = failure.Message
+			}
+		}
+		if message == "" {
+			message = resp.Status
+		}
+		return usage, &APIError{Status: resp.StatusCode, Message: message}
+	}
+	if err := json.Unmarshal(body, &usage); err != nil {
+		return usage, err
+	}
+	if usage.Currency == "" {
+		usage.Currency = usage.Unit
+	}
+	if usage.Unit == "" {
+		usage.Unit = usage.Currency
+	}
+	if usage.Currency == "" {
+		usage.Currency, usage.Unit = "USD", "USD"
+	}
+	return usage, nil
+}
+
 // ModelOption is BeeAPI's API-key-scoped capability view for setup clients.
 // It intentionally stays separate from the OpenAI-compatible /v1/models
 // response, whose schema cannot describe the wire protocols a route supports.

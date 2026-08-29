@@ -18,7 +18,7 @@ import (
 
 const keyringService = "com.getbeeapi.cli"
 
-const CurrentSchemaVersion = 2
+const CurrentSchemaVersion = 4
 
 type Credential struct {
 	ID           string `json:"id"`
@@ -28,8 +28,25 @@ type Credential struct {
 	Backend      string `json:"backend"`
 }
 
+// Profile is a named BeeAPI configuration plan. It contains only fields owned
+// by GetBeeAPI; native tool configuration files remain the source of truth for
+// unrelated settings such as MCP servers, permissions, themes, and plugins.
+// API keys are referenced by credential ID and are never copied into profiles.
+type Profile struct {
+	ID               string            `json:"id"`
+	Name             string            `json:"name"`
+	Endpoint         string            `json:"endpoint"`
+	DefaultModel     string            `json:"default_model,omitempty"`
+	Models           map[string]string `json:"models,omitempty"`
+	Agents           []string          `json:"agents,omitempty"`
+	AgentCredentials map[string]string `json:"agent_credentials,omitempty"`
+	CreatedAt        time.Time         `json:"created_at,omitempty"`
+	UpdatedAt        time.Time         `json:"updated_at,omitempty"`
+}
+
 type Config struct {
 	SchemaVersion     int               `json:"schema_version,omitempty"`
+	Language          string            `json:"language,omitempty"`
 	Endpoint          string            `json:"endpoint"`
 	KeyName           string            `json:"key_name,omitempty"`
 	DefaultModel      string            `json:"default_model,omitempty"`
@@ -37,6 +54,10 @@ type Config struct {
 	Agents            []string          `json:"agents,omitempty"`
 	Credentials       []Credential      `json:"credentials,omitempty"`
 	AgentCredentials  map[string]string `json:"agent_credentials,omitempty"`
+	AgentEndpoints    map[string]string `json:"agent_endpoints,omitempty"`
+	Profiles          []Profile         `json:"profiles,omitempty"`
+	ActiveProfile     string            `json:"active_profile,omitempty"`
+	ActiveProfiles    map[string]string `json:"active_profiles,omitempty"`
 	BinaryPath        string            `json:"binary_path,omitempty"`
 	CredentialBackend string            `json:"credential_backend,omitempty"`
 	InitializedAt     time.Time         `json:"initialized_at,omitempty"`
