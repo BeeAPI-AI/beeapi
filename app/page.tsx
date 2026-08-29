@@ -20,8 +20,8 @@ const phases = [
     number: "03",
     key: "APPLY",
     title: "配置本地工具",
-    description: "识别已有 CLI 和配置文件，多选目标工具，为每个工具选择密钥配置与模型；统一备份后写入，任一步失败都可恢复整个批次。",
-    note: "detect → credential → model → apply",
+    description: "识别已有 CLI 和配置文件，多选目标工具，为每个工具选择密钥与模型；给这组选择起名，统一备份后写入，任一步失败都可恢复整个批次。",
+    note: "detect → key → model → named profile",
   },
 ];
 
@@ -64,6 +64,10 @@ const faqs = [
   {
     question: "不方便使用网页授权怎么办？",
     answer: "选择第二项，粘贴 BeeAPI 控制台生成的单个 API Key 即可。兼容模式仍不会要求账户密码。",
+  },
+  {
+    question: "能保存并切换多套配置吗？",
+    answer: "可以。输入 beeapi 后只需给方案起名并按编号选择工具、Key 与模型；切换时先备份，再只更新 BeeAPI 管理字段。主页还会显示账户余额与每个 Key 的可用状态。",
   },
   {
     question: "Claude Desktop 的普通聊天也会切换到 BeeAPI 吗？",
@@ -124,7 +128,7 @@ export default function Home() {
           </div>
         </div>
 
-        <p className="hero-hint">首次输入 <code>beeapi</code> 完成三步设置；以后输入则打开功能主页。</p>
+        <p className="hero-hint">首次输入 <code>beeapi</code> 完成三步设置；以后输入即可切换命名方案、查看余额与 Key 状态。</p>
 
         <div className="hero-toolrail" aria-label="GetBeeAPI 支持的工具">
           <p>一条命令，配置这些工具</p>
@@ -223,7 +227,7 @@ export default function Home() {
         <div className="section-heading centered-heading">
           <p className="section-kicker">HOW IT WORKS</p>
           <h2>从 BeeAPI 密钥配置，到工具里的可用模型。</h2>
-          <p>首次运行只有三步：可用入口、BeeAPI 连接、工具与模型配置。完成后再次输入 beeapi，会直接进入日常功能主页。</p>
+          <p>首次运行只有三步：可用入口、BeeAPI 连接、工具与模型配置。完成后再次输入 beeapi，会直接进入可切换方案、查看余额与管理 Key 状态的日常主页。</p>
         </div>
         <ol className="workflow-list">
           {phases.map((phase) => (
