@@ -1,6 +1,23 @@
-# GetBeeAPI
+# BeeAPI · GetBeeAPI
 
-GetBeeAPI 是把 BeeAPI 快速接入现有 AI 工具的跨平台配置器，不是一个新的智能体。首次运行 `beeapi` 时按下面的三步完成设置：
+BeeAPI 官方访问入口，以及面向 Claude Code、Claude Desktop、Codex、Gemini CLI、Grok Build、OpenCode、OpenClaw 和 Hermes 的快捷配置工具。
+
+## BeeAPI 官方网址与 API 入口
+
+| 域名 | 官方链接 | 用途 |
+|---|---|---|
+| `beeapi.ai` | [打开 BeeAPI](https://beeapi.ai/) | 官网与 API 入口 |
+| `beeapi.dev` | [打开 BeeAPI](https://beeapi.dev/) | 官网与 API 入口 |
+
+两个域名均为 BeeAPI 官方可用入口。不同地区、DNS 服务商和网络线路的可达性可能不同；如果其中一个入口暂时无法打开，可以直接尝试另一个。
+
+建议收藏本仓库作为 BeeAPI 官方地址与 GetBeeAPI 安装方式的长期索引。登录、充值和粘贴 API Key 前，请确认浏览器地址属于上表列出的官方域名。
+
+## GetBeeAPI CLI
+
+GetBeeAPI 是把 BeeAPI 快速接入现有 AI 工具的跨平台配置器，不是一个新的智能体。它会检测可用的 BeeAPI 官方入口，并帮助用户完成网站授权、API Key 与模型选择，以及现有工具配置的安全写入。
+
+首次运行 `beeapi` 时按下面的三步完成设置：
 
 1. 从内置入口开始探测 `/healthz`，再通过可用入口读取 `/api/v1/public/api-endpoints` 并验证官方列表。正常可访问时直接选择最快入口；只有用户选择不可访问的域名时才尝试 Cloudflare IP 优选和受管 Hosts，优选失败则自动回退到已有可用入口继续设置。
 2. 在 BeeAPI 网站登录、核对并授权当前设备。批准后 CLI 一次读取账户中当前可导出的可用 API Key，再分别获取可用模型；也可直接粘贴单个 API Key 作为兼容回退。
@@ -11,6 +28,8 @@ GetBeeAPI 是把 BeeAPI 快速接入现有 AI 工具的跨平台配置器，不�
 CLI 永远不会询问 BeeAPI 账号密码，也不会读取网页登录 Cookie。网页会明确说明授权范围；批准后，BeeAPI 通过一次性领取流程把账户当时可导出的现有 API Key 交给 CLI，不额外创建 Key。协议见 [设备授权契约](docs/device-authorization.md)。不方便使用网页授权时，可直接使用单 Key 兼容模式。
 
 ## 安装
+
+项目主页与图形化安装说明：[https://getbeeapi.com](https://getbeeapi.com/)
 
 Linux / macOS：
 
