@@ -12,8 +12,9 @@ test("exports the GetBeeAPI product page for static hosting", async () => {
   assert.match(html, /不替代你的 AI 工具/);
   assert.match(html, /切换到英文/);
   assert.match(html, /切换到深色模式/);
-  assert.match(html, /成功安装/);
-  assert.match(html, /安装并验证成功后计数/);
+  assert.match(html, /脚本安装成功/);
+  assert.match(html, /正在读取安装统计/);
+  assert.match(html, /无需手动运行命令/);
   assert.match(html, /不保存 IP、账号或 Key/);
   assert.match(html, /https:\/\/getbeeapi\.com\/og-v2\.png/);
   assert.doesNotMatch(html, /https:\/\/getbeeapi\.com\/og\.png/);
@@ -67,6 +68,10 @@ test("ships matching verified installers", async () => {
   assert.match(shell, /SHA-256 verification failed/);
   assert.match(shell, /getbeeapi\.com\/releases\/latest\/download/);
   assert.match(shell, /github\.com\/BeeAPI-AI\/beeapi\/releases/);
+  assert.match(shell, /"\$install_dir\/beeapi" --version/);
+  assert.match(shell, /getbeeapi\.com\/api\/install-events/);
+  assert.match(shell, /BEEAPI_DISABLE_INSTALL_STATS/);
+  assert.match(shell, /install_source_for/);
   assert.match(shell, /\( : <\/dev\/tty \) 2>\/dev\/null/);
   assert.match(shell, /"\$install_dir\/beeapi" <\/dev\/tty/);
   assert.match(shell, /getbeeapi PATH/);
@@ -74,6 +79,10 @@ test("ships matching verified installers", async () => {
   assert.match(powerShell, /Get-FileHash -Algorithm SHA256/);
   assert.match(powerShell, /getbeeapi\.com\/releases\/latest\/download/);
   assert.match(powerShell, /github\.com\/BeeAPI-AI\/beeapi\/releases/);
+  assert.match(powerShell, /& \$Target --version/);
+  assert.match(powerShell, /getbeeapi\.com\/api\/install-events/);
+  assert.match(powerShell, /BEEAPI_DISABLE_INSTALL_STATS/);
+  assert.match(powerShell, /Get-InstallSource/);
   assert.match(powerShell, /PROCESSOR_ARCHITEW6432/);
   assert.match(powerShell, /PROCESSOR_ARCHITECTURE/);
   assert.match(powerShell, /SecurityProtocolType\]::Tls12/);

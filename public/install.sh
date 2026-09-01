@@ -184,7 +184,50 @@ sha256_file() {
   fi
 }
 
+install_source_for() {
+  case "$1" in
+    https://getbeeapi.com/*) printf '%s' "getbeeapi" ;;
+    https://github.com/*) printf '%s' "github" ;;
+    *) printf '%s' "custom" ;;
+  esac
+}
+
+report_verified_install() {
+  if [ "${BEEAPI_DISABLE_INSTALL_STATS:-0}" = "1" ] || \
+     [ "${DO_NOT_TRACK:-0}" = "1" ]; then
+    return 0
+  fi
+
+  stats_url="${BEEAPI_INSTALL_STATS_URL:-https://getbeeapi.com/api/install-events}"
+  case "$stats_url" in
+    https://*) ;;
+    *) return 0 ;;
+  esac
+
+  event_id=""
+  if command -v od >/dev/null 2>&1 && [ -r /dev/urandom ]; then
+    event_id="$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
+  fi
+  case "$event_id" in
+    *[!0-9a-f]*|'') return 0 ;;
+  esac
+  [ "${#event_id}" -eq 32 ] || return 0
+
+  payload="{\"event_id\":\"$event_id\",\"version\":\"$installed_version\",\"os\":\"$os\",\"arch\":\"$arch\",\"source\":\"$install_source\",\"installer\":\"shell\"}"
+  if command -v curl >/dev/null 2>&1; then
+    curl --fail --silent --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
+      --connect-timeout 2 --max-time 3 --request POST \
+      --header 'Content-Type: application/json' --data "$payload" "$stats_url" \
+      >/dev/null 2>&1 || true
+  elif command -v wget >/dev/null 2>&1 && wget --help 2>&1 | grep -q 'https-only'; then
+    wget --https-only --quiet --timeout=3 --tries=1 \
+      --header='Content-Type: application/json' --post-data="$payload" \
+      "$stats_url" --output-document=/dev/null >/dev/null 2>&1 || true
+  fi
+}
+
 downloaded=0
+verified_base=""
 for candidate_base in $bases; do
   printf 'Downloading %s from %s…\n' "$asset" "$candidate_base"
   if download "$candidate_base/$asset" "$tmp_dir/$asset" && \
@@ -203,6 +246,7 @@ for candidate_base in $bases; do
     esac
     if [ "$checksum_valid" -eq 1 ]; then
       downloaded=1
+      verified_base="$candidate_base"
       break
     fi
     printf '%s\n' "SHA-256 verification failed for this source; trying the next source." >&2
@@ -215,6 +259,8 @@ if [ "$downloaded" -ne 1 ]; then
   exit 1
 fi
 
+install_source="$(install_source_for "$verified_base")"
+
 tar -xzf "$tmp_dir/$asset" -C "$tmp_dir" beeapi
 mkdir -p "$install_dir"
 if command -v install >/dev/null 2>&1; then
@@ -224,8 +270,21 @@ else
   chmod 0755 "$install_dir/beeapi"
 fi
 
+if ! "$install_dir/beeapi" --version > "$tmp_dir/installed-version" 2>/dev/null; then
+  printf '%s\n' "Installed binary could not complete its version check." >&2
+  exit 1
+fi
+installed_version="$(sed -n '1p' "$tmp_dir/installed-version" | tr -d '\r\n')"
+case "$installed_version" in
+  ''|*[!0-9A-Za-z._+-]*)
+    printf '%s\n' "Installed binary returned an invalid version." >&2
+    exit 1
+    ;;
+esac
+
 printf '\nInstalled beeapi to %s\n' "$install_dir/beeapi"
 configure_shell_path
+report_verified_install
 
 if [ "$run_setup" -eq 1 ]; then
   if [ -r /dev/tty ] && ( : </dev/tty ) 2>/dev/null; then

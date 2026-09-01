@@ -11,7 +11,12 @@ type Localized = { zh: string; en: string };
 type InstallStats = {
   metric: "verified_installations";
   successful_installs: number;
-  updated_at: string;
+  by_source: {
+    getbeeapi: number;
+    github: number;
+    custom: number;
+  };
+  updated_at: string | null;
 };
 
 const localized = (zh: string, en: string): Localized => ({ zh, en });
@@ -151,7 +156,12 @@ export default function HomePage() {
         return response.json() as Promise<InstallStats>;
       })
       .then((value) => {
-        if (value.metric !== "verified_installations" || !Number.isFinite(value.successful_installs)) {
+        if (
+          value.metric !== "verified_installations" ||
+          !Number.isFinite(value.successful_installs) ||
+          !Number.isFinite(value.by_source?.getbeeapi) ||
+          !Number.isFinite(value.by_source?.github)
+        ) {
           throw new Error("invalid stats response");
         }
         setStats(value);
@@ -165,6 +175,23 @@ export default function HomePage() {
   const installCount = useMemo(() => {
     if (!stats) return statsUnavailable ? "—" : "···";
     return new Intl.NumberFormat(locale === "zh" ? "zh-CN" : "en-US").format(stats.successful_installs);
+  }, [locale, stats, statsUnavailable]);
+
+  const installSources = useMemo(() => {
+    if (!stats) {
+      return statsUnavailable
+        ? (locale === "zh" ? "统计暂不可用" : "Statistics temporarily unavailable")
+        : (locale === "zh" ? "正在读取安装统计" : "Loading installation statistics");
+    }
+    const number = new Intl.NumberFormat(locale === "zh" ? "zh-CN" : "en-US");
+    const labels = [
+      `GetBeeAPI ${number.format(stats.by_source.getbeeapi)}`,
+      `GitHub ${number.format(stats.by_source.github)}`,
+    ];
+    if (stats.by_source.custom > 0) {
+      labels.push(`${locale === "zh" ? "其他" : "Other"} ${number.format(stats.by_source.custom)}`);
+    }
+    return labels.join(" · ");
   }, [locale, stats, statsUnavailable]);
 
   function toggleLocale() {
@@ -268,15 +295,15 @@ export default function HomePage() {
 
         <div className="hero-metrics" aria-label={text("GetBeeAPI 项目数据", "GetBeeAPI project statistics")}>
           <div className="metric-item metric-live">
-            <span><i aria-hidden="true" />{text("成功安装", "Verified installs")}</span>
+            <span><i aria-hidden="true" />{text("脚本安装成功", "Installer successes")}</span>
             <strong aria-live="polite">{installCount}</strong>
-            <small>{statsUnavailable ? text("计数服务待接入", "Counter not connected yet") : text("安装并验证成功后计数", "Counted after install verification")}</small>
+            <small>{installSources}</small>
           </div>
           <div className="metric-item"><span>{text("已适配工具", "Supported tools")}</span><strong>8</strong><small>{text("可检测，也可预配置", "Detected or preconfigured")}</small></div>
           <div className="metric-item"><span>{text("桌面系统", "Desktop systems")}</span><strong>3</strong><small>Linux · macOS · Windows</small></div>
           <div className="metric-item"><span>{text("官方入口", "Official endpoints")}</span><strong>2</strong><small>beeapi.ai · beeapi.dev</small></div>
         </div>
-        <p className="metric-disclaimer">{text("仅在安装包校验、写入并通过版本验证后计数；只汇总版本、系统、架构与日期，不保存 IP、账号或 Key。", "Counted only after checksum, installation, and version verification succeed. Only version, OS, architecture, and date are aggregated; no IP, account, or Key is stored.")}</p>
+        <p className="metric-disclaimer">{text("安装脚本会自动完成 SHA-256、写入与版本验证，无需手动运行命令；只汇总下载来源、版本、系统、架构与日期，不保存 IP、账号或 Key。", "The installer automatically verifies SHA-256, the written binary, and its version—no manual command is required. Only download source, version, OS, architecture, and date are aggregated; no IP, account, or Key is stored.")}</p>
       </section>
 
       <section className="tools-section" id="agents">

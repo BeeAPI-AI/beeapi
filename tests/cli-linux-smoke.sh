@@ -22,9 +22,14 @@ env \
   SHELL=/bin/sh \
   PATH="$test_path" \
   BEEAPI_TEST_ASSET_DIR="$work_dir/assets" \
+  BEEAPI_TEST_EVENT_FILE="$work_dir/install-event.json" \
+  BEEAPI_INSTALL_STATS_URL=https://stats.fixture.invalid/api/install-events \
   sh "$repo_dir/public/install.sh" --no-setup
 
 test -x "$work_dir/home/.local/bin/beeapi"
+grep -Fq '"version":"dev"' "$work_dir/install-event.json"
+grep -Fq '"source":"getbeeapi"' "$work_dir/install-event.json"
+grep -Fq '"installer":"shell"' "$work_dir/install-event.json"
 grep -Fq '# >>> getbeeapi PATH >>>' "$work_dir/home/.profile"
 env HOME="$work_dir/home" PATH="$test_path" sh -c '. "$HOME/.profile"; beeapi version' | grep -Fq 'dev'
 
@@ -34,6 +39,7 @@ env \
   SHELL=/bin/sh \
   PATH="$test_path" \
   BEEAPI_TEST_ASSET_DIR="$work_dir/assets" \
+  BEEAPI_DISABLE_INSTALL_STATS=1 \
   sh "$repo_dir/public/install.sh" --no-setup >/dev/null
 test "$(grep -Fc '# >>> getbeeapi PATH >>>' "$work_dir/home/.profile")" -eq 1
 
@@ -45,6 +51,7 @@ env \
   PATH="$test_path" \
   BEEAPI_TEST_ASSET_DIR="$work_dir/assets" \
   BEEAPI_DOWNLOAD_BASE=https://fixture.invalid \
+  BEEAPI_DISABLE_INSTALL_STATS=1 \
   sh "$repo_dir/public/install.sh" --no-setup >/dev/null
 grep -Fq 'export PATH="$HOME/.local/bin:$PATH"' "$work_dir/zsh-home/.zshrc"
 env HOME="$work_dir/zsh-home" PATH="$test_path" sh -c '. "$HOME/.zshrc"; beeapi version' | grep -Fq 'dev'
@@ -55,6 +62,7 @@ env \
   PATH="$test_path" \
   BEEAPI_TEST_ASSET_DIR="$work_dir/assets" \
   BEEAPI_DOWNLOAD_BASE=https://fixture.invalid \
+  BEEAPI_DISABLE_INSTALL_STATS=1 \
   sh "$repo_dir/public/install.sh" --no-setup >/dev/null
 grep -Fq 'fish_add_path -g $HOME/.local/bin' "$work_dir/fish-home/.config/fish/conf.d/getbeeapi.fish"
 
@@ -67,6 +75,7 @@ env \
   PATH="$test_path" \
   BEEAPI_TEST_ASSET_DIR="$work_dir/assets" \
   BEEAPI_TEST_FAIL_MIRROR=1 \
+  BEEAPI_DISABLE_INSTALL_STATS=1 \
   sh "$repo_dir/public/install.sh" --no-setup >/dev/null
 test -x "$work_dir/fallback-home/.local/bin/beeapi"
 
@@ -79,6 +88,7 @@ env \
   PATH="$test_path" \
   BEEAPI_TEST_ASSET_DIR="$work_dir/assets" \
   BEEAPI_TEST_CORRUPT_MIRROR=1 \
+  BEEAPI_DISABLE_INSTALL_STATS=1 \
   sh "$repo_dir/public/install.sh" --no-setup >/dev/null
 test -x "$work_dir/checksum-fallback-home/.local/bin/beeapi"
 

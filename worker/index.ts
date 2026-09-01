@@ -1,23 +1,8 @@
 /** Cloudflare Worker entry point for getbeeapi.com. */
 import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
+import { handleInstallStatsRequest } from "./install-stats";
 import { resolveReleaseRoute } from "./releases";
-
-interface Env {
-  ASSETS: Fetcher;
-  DB: D1Database;
-  IMAGES: {
-    input(stream: ReadableStream): {
-      transform(options: Record<string, unknown>): {
-        output(options: { format: string; quality: number }): Promise<{ response(): Response }>;
-      };
-    };
-  };
-}
-
-interface ExecutionContext {
-  waitUntil(promise: Promise<unknown>): void;
-}
 
 const releaseResponseHeaders = [
   "content-disposition",
@@ -26,7 +11,30 @@ const releaseResponseHeaders = [
   "last-modified",
 ] as const;
 
-async function fetchRelease(request: Request, ctx: ExecutionContext): Promise<Response | null> {
+type CloudflareImageFormat = "image/avif" | "image/webp" | "image/jpeg" | "image/png" | "image/gif";
+
+interface WorkerExecutionContext {
+  waitUntil(promise: Promise<unknown>): void;
+}
+
+function defaultEdgeCache(): Cache {
+  return (caches as CacheStorage & { readonly default: Cache }).default;
+}
+
+function cloudflareImageFormat(format: string): CloudflareImageFormat {
+  switch (format) {
+    case "image/avif":
+    case "image/webp":
+    case "image/jpeg":
+    case "image/png":
+    case "image/gif":
+      return format;
+    default:
+      return "image/jpeg";
+  }
+}
+
+async function fetchRelease(request: Request, ctx: WorkerExecutionContext): Promise<Response | null> {
   const route = resolveReleaseRoute(new URL(request.url));
   if (!route) return null;
   if (request.method !== "GET") {
@@ -34,7 +42,7 @@ async function fetchRelease(request: Request, ctx: ExecutionContext): Promise<Re
   }
 
   const cacheKey = new Request(request.url, { method: "GET" });
-  const cached = await caches.default.match(cacheKey);
+  const cached = await defaultEdgeCache().match(cacheKey);
   if (cached) return cached;
 
   const fallbackResponse = (): Response | null => {
@@ -48,7 +56,7 @@ async function fetchRelease(request: Request, ctx: ExecutionContext): Promise<Re
         "X-GetBeeAPI-Fallback": "1",
       },
     });
-    ctx.waitUntil(caches.default.put(cacheKey, response.clone()));
+    ctx.waitUntil(defaultEdgeCache().put(cacheKey, response.clone()));
     return response;
   };
 
@@ -86,7 +94,7 @@ async function fetchRelease(request: Request, ctx: ExecutionContext): Promise<Re
   // Preserve the upstream stream. The clone tees it to Cloudflare's cache
   // without loading release archives into Worker memory.
   const response = new Response(upstream.body, { status: upstream.status, headers });
-  ctx.waitUntil(caches.default.put(cacheKey, response.clone()));
+  ctx.waitUntil(defaultEdgeCache().put(cacheKey, response.clone()));
   return response;
 }
 
@@ -97,7 +105,7 @@ async function fetchRelease(request: Request, ctx: ExecutionContext): Promise<Re
 // const imageConfig: ImageConfig = { dangerouslyAllowSVG: true };
 
 const worker = {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: WorkerExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
     if (url.pathname.startsWith("/releases/")) {
@@ -105,12 +113,19 @@ const worker = {
       if (release) return release;
     }
 
+    if (url.pathname.startsWith("/api/")) {
+      return handleInstallStatsRequest(request, env);
+    }
+
     if (url.pathname === "/_vinext/image") {
       const allowedWidths = [...DEFAULT_DEVICE_SIZES, ...DEFAULT_IMAGE_SIZES];
       return handleImageOptimization(request, {
         fetchAsset: (path) => env.ASSETS.fetch(new Request(new URL(path, request.url))),
         transformImage: async (body, { width, format, quality }) => {
-          const result = await env.IMAGES.input(body).transform(width > 0 ? { width } : {}).output({ format, quality });
+          const result = await env.IMAGES.input(body).transform(width > 0 ? { width } : {}).output({
+            format: cloudflareImageFormat(format),
+            quality,
+          });
           return result.response();
         },
       }, allowedWidths);

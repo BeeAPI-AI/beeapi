@@ -36,6 +36,9 @@ yarn-error.log*
 
 # local hosting project bindings
 /.openai/
+/.agents/
+/.codex/
+*.tsbuildinfo
 
 /dist/
 /.wrangler/

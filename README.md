@@ -41,7 +41,9 @@ Windows PowerShell：
 irm https://getbeeapi.com/install.ps1 | iex
 ```
 
-安装器会校验发行包 SHA-256，并安装到用户目录。Unix 安装器会把安装目录幂等写入当前 shell 的启动文件；Windows 安装器会更新用户 PATH。通过管道安装时，Unix 安装器从 `/dev/tty` 启动交互向导。打开新终端后可直接输入 `beeapi`。
+安装器会校验发行包 SHA-256、写入用户目录，并自动运行一次版本检查；用户不需要手动执行 `beeapi --version`。验证成功后会发送一条匿名安装事件，仅包含随机事件 ID、实际下载来源、版本、系统和架构，用于官网汇总 GetBeeAPI 与 GitHub 两条下载路径；不包含 IP、账户或 API Key，统计失败不影响安装。设置 `BEEAPI_DISABLE_INSTALL_STATS=1` 或 `DO_NOT_TRACK=1` 可以关闭上报。
+
+Unix 安装器会把安装目录幂等写入当前 shell 的启动文件；Windows 安装器会更新用户 PATH。通过管道安装时，Unix 安装器从 `/dev/tty` 启动交互向导。打开新终端后可直接输入 `beeapi`。
 
 ## 本地开发
 

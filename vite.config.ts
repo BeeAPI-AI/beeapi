@@ -15,13 +15,27 @@ const localBindingConfig = {
       pattern: "getbeeapi.com/releases/*",
       zone_name: "getbeeapi.com",
     },
+    {
+      pattern: "getbeeapi.com/api/*",
+      zone_name: "getbeeapi.com",
+    },
   ],
   assets: {
-    // Release mirrors are dynamic Worker routes. Without this rule the
-    // static asset layer returns its own 404 before the Worker can proxy.
-    run_worker_first: ["/releases/*"],
+    binding: "ASSETS",
+    // Release mirrors and installation statistics are dynamic Worker routes.
+    // Without this rule the static asset layer returns its own 404 first.
+    run_worker_first: ["/releases/*", "/api/*"],
   },
-  d1_databases: [],
+  d1_databases: [
+    {
+      binding: "DB",
+      database_name: "getbeeapi-stats",
+      database_id: "e3223388-d9d7-4f97-8a22-0e6f5a2629a6",
+      // Vinext writes Wrangler's deploy config to dist/server.
+      migrations_dir: "../../drizzle",
+    },
+  ],
+  images: { binding: "IMAGES" },
   r2_buckets: [],
 };
 
