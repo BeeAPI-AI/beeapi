@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-const CurrentOAuthAccountVersion = 1
+const CurrentOAuthAccountVersion = 2
 
 // OAuthAccount contains only non-secret connection metadata. Access tokens,
 // refresh tokens, and the DPoP private key are stored together as one opaque

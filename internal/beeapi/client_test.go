@@ -3,7 +3,6 @@ package beeapi
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -159,110 +158,5 @@ func TestEndpointNamesAvoidInternationalLabels(t *testing.T) {
 	}
 	if got := endpointName("https://beeapi.ai.attacker.test", "External"); got != "External" {
 		t.Fatalf("lookalike domain was mislabeled as official: %q", got)
-	}
-}
-
-func TestDeviceAuthAcceptsStandardOAuthResponseAndError(t *testing.T) {
-	client := New("https://beeapi.test")
-	requests := 0
-	client.HTTP = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		requests++
-		if r.Header.Get("DPoP") == "" {
-			t.Fatalf("request %d is missing its DPoP proof", requests)
-		}
-		if got := r.Header.Get("Authorization"); got != "" {
-			t.Fatalf("public device request unexpectedly has authorization: %q", got)
-		}
-		if requests == 1 {
-			var requestBody map[string]any
-			if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
-				t.Fatal(err)
-			}
-			if requestBody["scope"] != "cli:configure" {
-				t.Fatalf("unexpected device scope: %#v", requestBody["scope"])
-			}
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Header:     make(http.Header),
-				Body:       io.NopCloser(bytes.NewBufferString(`{"device_code":"device-secret","user_code":"BEE7-K9Q2","verification_uri":"https://beeapi.test/cli/authorize","expires_in":600,"interval":5}`)),
-				Request:    r,
-			}, nil
-		}
-		return &http.Response{
-			StatusCode: http.StatusBadRequest,
-			Header:     make(http.Header),
-			Body:       io.NopCloser(bytes.NewBufferString(`{"error":"authorization_pending","error_description":"Waiting for user"}`)),
-			Request:    r,
-		}, nil
-	})}
-
-	code, err := client.StartDeviceAuth(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if code.DeviceCode != "device-secret" || code.UserCode != "BEE7-K9Q2" || code.Interval != 5 {
-		t.Fatalf("unexpected standard device response: %#v", code)
-	}
-	_, err = client.PollDeviceAuth(context.Background(), code.DeviceCode)
-	var apiErr *APIError
-	if !errors.As(err, &apiErr) || apiErr.Reason != "authorization_pending" {
-		t.Fatalf("unexpected standard OAuth error: %#v", err)
-	}
-}
-
-func TestCLISessionClaimsDeviceSpecificCredentials(t *testing.T) {
-	client := New("https://beeapi.test")
-	client.Token = "beecli-session"
-	requests := 0
-	client.HTTP = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		requests++
-		if got := r.Header.Get("Authorization"); got != "DPoP beecli-session" {
-			t.Fatalf("unexpected CLI authorization header: %q", got)
-		}
-		if r.Header.Get("DPoP") == "" {
-			t.Fatal("protected CLI request is missing its DPoP proof")
-		}
-		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/cli/credentials/claim" {
-			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
-		}
-		body := `{"code":0,"message":"ok","data":{"credentials":[{"credential_id":"bcc_grant-1","profile_name":"daily","source_key_prefix":"sk-source","device_key_name":"CLI · daily","device_key_prefix":"sk-device","api_key":"sk-device-secret"},{"credential_id":"bcc_grant-2","profile_name":"coding","source_key_prefix":"sk-source-2","device_key_name":"CLI · coding","device_key_prefix":"sk-device-2","api_key":"sk-device-secret-2"}],"retry_until":"2026-08-28T12:00:00Z"}}`
-		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewBufferString(body)), Request: r}, nil
-	})}
-
-	claim, err := client.ClaimCLICredentials(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(claim.Credentials) != 2 || claim.Credentials[0].ProfileName != "daily" {
-		t.Fatalf("unexpected credentials: %#v", claim.Credentials)
-	}
-	if claim.Credentials[0].APIKey != "sk-device-secret" || claim.Credentials[1].CredentialID != "bcc_grant-2" {
-		t.Fatalf("claim payload was not decoded: %#v", claim.Credentials)
-	}
-	if requests != 1 {
-		t.Fatalf("claim request count = %d, want 1", requests)
-	}
-}
-
-func TestCLISessionClaimsExistingAccountKeysAndSkippedMetadata(t *testing.T) {
-	client := New("https://beeapi.test")
-	client.Token = "beecli-session"
-	client.HTTP = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		body := `{"code":0,"message":"ok","data":{"credential_mode":"existing_key_export_v2","credentials":[{"credential_id":"bck_key-1","key_name":"OpenAI Plus","key_prefix":"sk-live","status":"enabled","expires_at":null,"api_key":"sk-existing-secret"}],"skipped":[{"credential_id":"bck_key-2","key_name":"旧密钥","key_prefix":"sk-old","status":"enabled","reason":"plaintext_unavailable"}],"retry_until":"2026-08-28T12:00:00Z"}}`
-		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewBufferString(body)), Request: r}, nil
-	})}
-
-	claim, err := client.ClaimCLICredentials(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if claim.CredentialMode != "existing_key_export_v2" || len(claim.Credentials) != 1 || claim.Credentials[0].KeyName != "OpenAI Plus" {
-		t.Fatalf("unexpected credentials: %#v", claim.Credentials)
-	}
-	if claim.Credentials[0].APIKey != "sk-existing-secret" || claim.Credentials[0].KeyPrefix != "sk-live" {
-		t.Fatalf("existing key payload was not decoded: %#v", claim.Credentials[0])
-	}
-	if len(claim.Skipped) != 1 || claim.Skipped[0].Reason != "plaintext_unavailable" {
-		t.Fatalf("skipped metadata was not decoded: %#v", claim.Skipped)
 	}
 }

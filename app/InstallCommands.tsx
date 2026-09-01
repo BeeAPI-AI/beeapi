@@ -2,6 +2,8 @@
 
 import { useState } from "react";
 
+type Locale = "zh" | "en";
+
 const commands = [
   {
     id: "curl",
@@ -17,10 +19,11 @@ const commands = [
   },
 ];
 
-export default function InstallCommands() {
+export default function InstallCommands({ locale = "zh" }: { locale?: Locale }) {
   const [active, setActive] = useState(commands[0].id);
   const [copied, setCopied] = useState(false);
   const current = commands.find((item) => item.id === active) ?? commands[0];
+  const text = (zh: string, en: string) => locale === "zh" ? zh : en;
 
   async function copyCommand() {
     await navigator.clipboard.writeText(current.command);
@@ -31,7 +34,7 @@ export default function InstallCommands() {
   return (
     <div className="command-wrap">
       <div className="command-card">
-        <div className="command-tabs" role="tablist" aria-label="选择操作系统">
+        <div className="command-tabs" role="tablist" aria-label={text("选择操作系统", "Choose an operating system")}>
           {commands.map((item) => (
             <button
               key={item.id}
@@ -47,9 +50,9 @@ export default function InstallCommands() {
         </div>
         <div className="command-line" role="tabpanel">
           <code>{current.command}</code>
-          <button className={copied ? "copy-button copied" : "copy-button"} onClick={copyCommand} type="button" aria-label="复制安装命令">
+          <button className={copied ? "copy-button copied" : "copy-button"} onClick={copyCommand} type="button" aria-label={text("复制安装命令", "Copy installation command")}>
             {copied ? (
-              <span aria-live="polite">已复制</span>
+              <span aria-live="polite">{text("已复制", "Copied")}</span>
             ) : (
               <svg viewBox="0 0 20 20" aria-hidden="true">
                 <rect x="7" y="3" width="9" height="11" rx="1.5" />
@@ -59,7 +62,7 @@ export default function InstallCommands() {
           </button>
         </div>
       </div>
-      <span className="command-platform">适用于 {current.platform}</span>
+      <span className="command-platform">{text("适用于", "For")} {current.platform}</span>
     </div>
   );
 }

@@ -10,6 +10,11 @@ test("exports the GetBeeAPI product page for static hosting", async () => {
   assert.match(html, /<title>GetBeeAPI/);
   assert.match(html, /把 BeeAPI，接入你/);
   assert.match(html, /不替代你的 AI 工具/);
+  assert.match(html, /切换到英文/);
+  assert.match(html, /切换到深色模式/);
+  assert.match(html, /成功安装/);
+  assert.match(html, /安装并验证成功后计数/);
+  assert.match(html, /不保存 IP、账号或 Key/);
   assert.match(html, /https:\/\/getbeeapi\.com\/og-v2\.png/);
   assert.doesNotMatch(html, /https:\/\/getbeeapi\.com\/og\.png/);
   assert.match(html, /curl -fsSL https:\/\/getbeeapi\.com\/install\.sh \| sh/);

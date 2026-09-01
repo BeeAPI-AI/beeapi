@@ -23,6 +23,14 @@ type oauthKeyChoice struct {
 }
 
 func (r *runner) authorizeWithExistingOAuth(existing state.OAuthAccount, endpoint string, noOpen bool, mode string) (authorizationResult, error) {
+	selectedIssuer, err := beeapi.OAuthIssuerForEntrance(endpoint)
+	if err != nil {
+		return authorizationResult{}, err
+	}
+	if existing.Issuer != selectedIssuer {
+		r.line(r.out, "  当前入口属于另一 OAuth 安全域，正在重新授权。", "  The current endpoint belongs to another OAuth security domain; authorizing again.")
+		return r.authorizeAndSelectOAuthCredentials(endpoint, noOpen, mode)
+	}
 	identity := strings.TrimSpace(existing.Username)
 	if identity == "" {
 		identity = strings.TrimSpace(existing.Email)

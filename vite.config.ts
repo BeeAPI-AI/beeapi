@@ -6,7 +6,9 @@ const isCodexSeatbeltSandbox = process.env.CODEX_SANDBOX === "seatbelt";
 
 const localBindingConfig = {
   main: "./worker/index.ts",
-  compatibility_date: "2026-08-28",
+  // Keep local Miniflare and production on a date supported by the bundled
+  // Workers runtime. This site does not rely on newer compatibility changes.
+  compatibility_date: "2026-05-22",
   compatibility_flags: ["nodejs_compat"],
   routes: [
     {

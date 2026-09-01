@@ -13,37 +13,63 @@ import (
 	"testing"
 )
 
-func oauthTestMetadata() OAuthMetadata {
+func oauthTestMetadataFor(issuer string) OAuthMetadata {
 	return OAuthMetadata{
-		Issuer:                      "https://beeapi.dev",
-		AuthorizationEndpoint:       "https://beeapi.dev/oauth/authorize",
-		TokenEndpoint:               "https://beeapi.dev/oauth/token",
-		DeviceAuthorizationEndpoint: "https://beeapi.dev/oauth/device/code",
-		RevocationEndpoint:          "https://beeapi.dev/oauth/revoke",
+		Issuer:                      issuer,
+		AuthorizationEndpoint:       issuer + "/oauth/authorize",
+		TokenEndpoint:               issuer + "/oauth/token",
+		DeviceAuthorizationEndpoint: issuer + "/oauth/device/code",
+		RevocationEndpoint:          issuer + "/oauth/revoke",
 		ResponseTypesSupported:      []string{"code"},
 		GrantTypesSupported:         []string{"authorization_code", "refresh_token", OAuthDeviceGrant},
 		CodeChallengeMethods:        []string{"S256"},
 		TokenAuthMethods:            []string{"none"},
 		ScopesSupported:             append([]string(nil), OAuthAccountScopes...),
 		DPoPSigningAlgorithms:       []string{"ES256"},
+		AuthorizationResponseIssuer: true,
 	}
 }
 
-func TestOAuthMetadataAllowsCanonicalBeeAPIDevFromOfficialAlias(t *testing.T) {
-	client := New("https://beeapi.ai")
+func oauthTestMetadata() OAuthMetadata {
+	return oauthTestMetadataFor(OAuthIssuerDev)
+}
+
+func TestOAuthMetadataFollowsOnlyTheMatchingDiscoveryAlias(t *testing.T) {
+	client := New("https://api.beeapi.ai")
+	requests := 0
 	client.HTTP = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		if r.URL.String() != "https://beeapi.ai/.well-known/oauth-authorization-server" {
-			t.Fatalf("unexpected metadata URL: %s", r.URL)
+		requests++
+		if r.Header.Get("Authorization") != "" || r.Header.Get("DPoP") != "" {
+			t.Fatalf("discovery leaked credentials: %#v", r.Header)
 		}
-		body := `{"issuer":"https://beeapi.dev","authorization_endpoint":"https://beeapi.dev/oauth/authorize","token_endpoint":"https://beeapi.dev/oauth/token","device_authorization_endpoint":"https://beeapi.dev/oauth/device/code","revocation_endpoint":"https://beeapi.dev/oauth/revoke","response_types_supported":["code"],"grant_types_supported":["authorization_code","refresh_token","urn:ietf:params:oauth:grant-type:device_code"],"code_challenge_methods_supported":["S256"],"token_endpoint_auth_methods_supported":["none"],"scopes_supported":["account:profile:read","account:balance:read","api_keys:read","api_keys:export","offline_access"],"dpop_signing_alg_values_supported":["ES256"]}`
-		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewBufferString(body)), Request: r}, nil
+		switch r.URL.Host {
+		case "api.beeapi.ai":
+			return &http.Response{StatusCode: http.StatusPermanentRedirect, Header: http.Header{"Location": {OAuthIssuerAI + "/.well-known/oauth-authorization-server"}}, Body: io.NopCloser(strings.NewReader("")), Request: r}, nil
+		case "beeapi.ai":
+			body := `{"issuer":"https://beeapi.ai","authorization_endpoint":"https://beeapi.ai/oauth/authorize","token_endpoint":"https://beeapi.ai/oauth/token","device_authorization_endpoint":"https://beeapi.ai/oauth/device/code","revocation_endpoint":"https://beeapi.ai/oauth/revoke","response_types_supported":["code"],"grant_types_supported":["authorization_code","refresh_token","urn:ietf:params:oauth:grant-type:device_code"],"code_challenge_methods_supported":["S256"],"token_endpoint_auth_methods_supported":["none"],"dpop_signing_alg_values_supported":["ES256"],"authorization_response_iss_parameter_supported":true}`
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewBufferString(body)), Request: r}, nil
+		default:
+			t.Fatalf("unexpected metadata host: %s", r.URL.Host)
+			return nil, nil
+		}
 	})}
 	metadata, err := client.OAuthMetadata(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if metadata.Issuer != "https://beeapi.dev" || !metadata.SupportsDeviceGrant() {
+	if metadata.Issuer != OAuthIssuerAI || !metadata.SupportsDeviceGrant() || requests != 2 {
 		t.Fatalf("unexpected metadata: %#v", metadata)
+	}
+}
+
+func TestOAuthMetadataRejectsTheOtherOfficialIssuer(t *testing.T) {
+	client := New(OAuthIssuerAI)
+	client.HTTP = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		body := `{"issuer":"https://beeapi.dev","authorization_endpoint":"https://beeapi.dev/oauth/authorize","token_endpoint":"https://beeapi.dev/oauth/token","device_authorization_endpoint":"https://beeapi.dev/oauth/device/code","revocation_endpoint":"https://beeapi.dev/oauth/revoke","response_types_supported":["code"],"grant_types_supported":["authorization_code","refresh_token","urn:ietf:params:oauth:grant-type:device_code"],"code_challenge_methods_supported":["S256"],"token_endpoint_auth_methods_supported":["none"],"dpop_signing_alg_values_supported":["ES256"],"authorization_response_iss_parameter_supported":true}`
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+	})}
+	if _, err := client.OAuthMetadata(context.Background()); err == nil || !strings.Contains(err.Error(), "selected entrance") {
+		t.Fatalf("cross-issuer metadata was accepted: %v", err)
 	}
 }
 
@@ -75,21 +101,50 @@ func TestOAuthMetadataDoesNotDowngradePartiallyInvalidMetadata(t *testing.T) {
 func TestOAuthMetadataRejectsUntrustedAuthorizationHost(t *testing.T) {
 	metadata := oauthTestMetadata()
 	metadata.AuthorizationEndpoint = "https://beeapi.dev.attacker.test/oauth/authorize"
-	if err := validateOAuthMetadata("https://beeapi.ai", metadata); err == nil || !strings.Contains(err.Error(), "not trusted") {
+	if err := validateOAuthMetadata(OAuthIssuerDev, metadata); err == nil || !strings.Contains(err.Error(), "selected issuer") {
 		t.Fatalf("unexpected validation result: %v", err)
 	}
 }
 
-func TestOAuthMetadataRejectsIssuerAliasesAndNonDefaultPorts(t *testing.T) {
-	metadata := oauthTestMetadata()
-	metadata.Issuer = "https://beeapi.ai"
-	if err := validateOAuthMetadata("https://beeapi.ai", metadata); err == nil || !strings.Contains(err.Error(), "issuer must") {
-		t.Fatalf("issuer alias was accepted: %v", err)
+func TestOAuthMetadataRejectsCrossIssuerEndpointsAndNonDefaultPorts(t *testing.T) {
+	metadata := oauthTestMetadataFor(OAuthIssuerAI)
+	metadata.TokenEndpoint = OAuthIssuerDev + "/oauth/token"
+	if err := validateOAuthMetadata(OAuthIssuerAI, metadata); err == nil || !strings.Contains(err.Error(), "selected issuer") {
+		t.Fatalf("cross-issuer endpoint was accepted: %v", err)
 	}
 	metadata = oauthTestMetadata()
 	metadata.TokenEndpoint = "https://beeapi.dev:8443/oauth/token"
-	if err := validateOAuthMetadata("https://beeapi.dev", metadata); err == nil || !strings.Contains(err.Error(), "valid HTTPS") {
+	if err := validateOAuthMetadata(OAuthIssuerDev, metadata); err == nil || !strings.Contains(err.Error(), "valid HTTPS") {
 		t.Fatalf("non-default OAuth port was accepted: %v", err)
+	}
+}
+
+func TestOAuthMetadataRequiresCallbackIssuerSupportButAllowsOmittedScopeAdvertisement(t *testing.T) {
+	metadata := oauthTestMetadata()
+	metadata.AuthorizationResponseIssuer = false
+	if err := validateOAuthMetadata(OAuthIssuerDev, metadata); err == nil || !strings.Contains(err.Error(), "response issuer") {
+		t.Fatalf("metadata without callback issuer support was accepted: %v", err)
+	}
+	metadata.AuthorizationResponseIssuer = true
+	metadata.ScopesSupported = nil
+	if err := validateOAuthMetadata(OAuthIssuerDev, metadata); err != nil {
+		t.Fatalf("optional scopes_supported was required: %v", err)
+	}
+}
+
+func TestOAuthIssuerForEntranceMapsOnlyMatchingOfficialDomains(t *testing.T) {
+	for entrance, want := range map[string]string{
+		OAuthIssuerAI: OAuthIssuerAI, "https://api.beeapi.ai": OAuthIssuerAI,
+		OAuthIssuerDev: OAuthIssuerDev, "https://api.beeapi.dev": OAuthIssuerDev,
+	} {
+		if got, err := OAuthIssuerForEntrance(entrance); err != nil || got != want {
+			t.Fatalf("OAuthIssuerForEntrance(%q) = %q, %v; want %q", entrance, got, err, want)
+		}
+	}
+	for _, entrance := range []string{"https://beeapi.ai.attacker.test", "https://api.beeapi.dev:8443", "http://beeapi.ai"} {
+		if _, err := OAuthIssuerForEntrance(entrance); err == nil {
+			t.Fatalf("untrusted entrance was accepted: %s", entrance)
+		}
 	}
 }
 
@@ -101,6 +156,141 @@ func TestOAuthTokenRejectsCredentialsFromAnotherDomain(t *testing.T) {
 		if _, err := validateOAuthToken(token); err == nil {
 			t.Fatalf("invalid OAuth credential domain was accepted: %#v", token)
 		}
+	}
+}
+
+func TestOAuthCredentialRequestsNeverCrossIssuerOrFollowRedirects(t *testing.T) {
+	client := New(OAuthIssuerAI)
+	requests := 0
+	client.HTTP = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		requests++
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"access_token":"boa_wrong","token_type":"DPoP","expires_in":600}`)), Request: r}, nil
+	})}
+	if _, err := client.ExchangeAuthorizationCode(context.Background(), oauthTestMetadata(), "code", "http://127.0.0.1:43127/oauth/callback", "verifier"); err == nil || !errors.Is(err, ErrOAuthIssuerBoundary) {
+		t.Fatalf("authorization code was allowed to cross issuers: %v", err)
+	}
+	if requests != 0 {
+		t.Fatalf("cross-issuer token request reached the network: %d", requests)
+	}
+
+	metadata := oauthTestMetadataFor(OAuthIssuerAI)
+	client = New(OAuthIssuerAI)
+	requests = 0
+	client.HTTP = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		requests++
+		if r.URL.Host != "beeapi.ai" {
+			t.Fatalf("sensitive redirect was followed to %s", r.URL.Host)
+		}
+		var claims struct {
+			HTU string `json:"htu"`
+		}
+		decodeJWTJSON(t, strings.Split(r.Header.Get("DPoP"), ".")[1], &claims)
+		if claims.HTU != OAuthIssuerAI+"/oauth/device/code" {
+			t.Fatalf("DPoP htu = %q", claims.HTU)
+		}
+		return &http.Response{
+			StatusCode: http.StatusTemporaryRedirect,
+			Header:     http.Header{"Location": {OAuthIssuerDev + "/oauth/device/code"}},
+			Body:       io.NopCloser(strings.NewReader("")), Request: r,
+		}, nil
+	})}
+	if _, err := client.StartOAuthDeviceAuth(context.Background(), metadata, OAuthAccountScopes); err == nil {
+		t.Fatal("sensitive OAuth POST redirect was accepted")
+	}
+	if requests != 1 {
+		t.Fatalf("sensitive OAuth POST followed a redirect: %d requests", requests)
+	}
+
+	metadata.DeviceAuthorizationEndpoint = "https://api.beeapi.ai/oauth/device/code"
+	aliasClient := New("https://api.beeapi.ai")
+	aliasRequests := 0
+	aliasClient.HTTP = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		aliasRequests++
+		return nil, errors.New("unexpected network request")
+	})}
+	if _, err := aliasClient.StartOAuthDeviceAuth(context.Background(), metadata, OAuthAccountScopes); err == nil || !errors.Is(err, ErrOAuthIssuerBoundary) {
+		t.Fatalf("credential-bearing POST to discovery alias was accepted: %v", err)
+	}
+	if aliasRequests != 0 {
+		t.Fatalf("credential-bearing alias request reached the network: %d", aliasRequests)
+	}
+}
+
+func TestOAuthDeviceRefreshAndRevokeCredentialsNeverCrossIssuers(t *testing.T) {
+	client := New(OAuthIssuerAI)
+	requests := 0
+	client.HTTP = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		requests++
+		return nil, errors.New("unexpected network request")
+	})}
+	metadata := oauthTestMetadataFor(OAuthIssuerDev)
+	checks := []struct {
+		name string
+		call func() error
+	}{
+		{name: "device code", call: func() error {
+			_, err := client.PollOAuthDeviceToken(context.Background(), metadata, "dev-device-code")
+			return err
+		}},
+		{name: "refresh token", call: func() error {
+			_, err := client.RefreshOAuthToken(context.Background(), metadata, "bor_dev")
+			return err
+		}},
+		{name: "revocation token", call: func() error {
+			return client.RevokeOAuthToken(context.Background(), metadata, "bor_dev", "refresh_token")
+		}},
+	}
+	for _, check := range checks {
+		t.Run(check.name, func(t *testing.T) {
+			if err := check.call(); err == nil || !errors.Is(err, ErrOAuthIssuerBoundary) {
+				t.Fatalf("cross-issuer %s was accepted: %v", check.name, err)
+			}
+		})
+	}
+	if requests != 0 {
+		t.Fatalf("cross-issuer credentials reached the network: %d", requests)
+	}
+}
+
+func TestOAuthAccountResourcesRejectDiscoveryAliasesBeforeSendingTokens(t *testing.T) {
+	client := New("https://api.beeapi.dev")
+	client.Token = "boa_dev"
+	requests := 0
+	client.HTTP = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		requests++
+		return nil, errors.New("unexpected network request")
+	})}
+	if _, err := client.OAuthAccount(context.Background()); err == nil || !strings.Contains(err.Error(), "discovery aliases") {
+		t.Fatalf("account token was accepted on a discovery alias: %v", err)
+	}
+	if requests != 0 {
+		t.Fatalf("account token reached a discovery alias: %d", requests)
+	}
+}
+
+func TestOAuthAccountResourceDPoPUsesTheCurrentIssuer(t *testing.T) {
+	client := New(OAuthIssuerAI)
+	client.Token = "boa_ai"
+	client.HTTP = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.String() != OAuthIssuerAI+"/api/v1/oauth/account" {
+			t.Fatalf("account request crossed issuer: %s", r.URL)
+		}
+		parts := strings.Split(r.Header.Get("DPoP"), ".")
+		if len(parts) != 3 {
+			t.Fatalf("missing DPoP proof: %q", r.Header.Get("DPoP"))
+		}
+		var claims struct {
+			HTU string `json:"htu"`
+		}
+		decodeJWTJSON(t, parts[1], &claims)
+		if claims.HTU != OAuthIssuerAI+"/api/v1/oauth/account" {
+			t.Fatalf("account DPoP htu = %q", claims.HTU)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"code":0,"data":{"id":1,"username":"ai-user"}}`)), Request: r}, nil
+	})}
+	profile, err := client.OAuthAccount(context.Background())
+	if err != nil || profile.Username != "ai-user" {
+		t.Fatalf("unexpected AI account response: %#v err=%v", profile, err)
 	}
 }
 

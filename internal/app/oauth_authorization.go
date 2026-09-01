@@ -208,6 +208,9 @@ func oauthRequestRetryable(err error) bool {
 	if err == nil {
 		return false
 	}
+	if errors.Is(err, beeapi.ErrOAuthIssuerBoundary) {
+		return false
+	}
 	var apiErr *beeapi.APIError
 	if errors.As(err, &apiErr) {
 		return apiErr.Status == http.StatusRequestTimeout || apiErr.Status == http.StatusTooEarly || apiErr.Status == http.StatusTooManyRequests || apiErr.Status >= 500

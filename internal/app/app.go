@@ -655,7 +655,14 @@ func (r *runner) authorize(endpoint string, noOpen bool, mode string) (authoriza
 			return authorizationResult{}, loadErr
 		}
 		if strings.TrimSpace(existing.TokenCredentialID) != "" && strings.TrimSpace(existing.TokenBackend) != "" {
-			return r.authorizeWithExistingOAuth(existing, endpoint, noOpen, mode)
+			selectedIssuer, issuerErr := beeapi.OAuthIssuerForEntrance(endpoint)
+			if issuerErr != nil {
+				return authorizationResult{}, issuerErr
+			}
+			if existing.Issuer == selectedIssuer {
+				return r.authorizeWithExistingOAuth(existing, endpoint, noOpen, mode)
+			}
+			r.line(r.out, "  BeeAPI 入口已切换到另一 OAuth 安全域，必须重新进行网页授权。", "  The BeeAPI endpoint changed to another OAuth security domain; browser authorization is required again.")
 		}
 	}
 	r.line(r.out, "  1. 跳转网站授权登录（推荐；授权此设备读取账户可用 API Key）", "  1. Authorize in your browser (recommended; allows this device to read available account API Keys)")
@@ -687,39 +694,16 @@ func (r *runner) authorize(endpoint string, noOpen bool, mode string) (authoriza
 	if !oauthCapabilityUnavailable(oauthErr) {
 		return authorizationResult{}, oauthErr
 	}
-	r.line(r.out, "  此入口尚未提供新版 OAuth 账户连接，正在尝试兼容设备授权。", "  This endpoint does not yet provide the new OAuth account connection; trying compatible device authorization.")
-	client := beeapi.New(endpoint)
-	deviceCtx, cancel := context.WithTimeout(r.ctx, 8*time.Second)
-	code, err := client.StartDeviceAuth(deviceCtx)
-	cancel()
-	if err == nil && code.DeviceCode != "" && code.UserCode != "" {
-		if presentErr := r.presentDeviceAuthorization(endpoint, code, noOpen); presentErr != nil {
-			return authorizationResult{}, presentErr
-		}
-		credentials, pollErr := r.pollDevice(client, code)
-		if pollErr == nil {
-			r.clearOAuthAccountForCompatibility()
-			return authorizationResult{Credentials: credentials}, nil
-		}
-		return authorizationResult{}, pollErr
-	}
-	var apiErr *beeapi.APIError
-	if err != nil && (!errors.As(err, &apiErr) || (apiErr.Status != 404 && apiErr.Status != 405 && apiErr.Status != 501)) {
-		r.format(r.out, "  网站授权暂时不可用：%v\n", "  Browser authorization is temporarily unavailable: %v\n", err)
-	} else {
-		r.line(r.out, "  当前 BeeAPI 服务端尚未开启 CLI 设备授权。", "  The selected BeeAPI server has not enabled CLI device authorization.")
-	}
-	if loginURL := accountLoginURL(endpoint); loginURL != "" {
-		r.format(r.out, "  BeeAPI 账户登录页: %s\n", "  BeeAPI account login: %s\n", loginURL)
-	}
-	r.line(r.out, "  服务端尚未生成设备码，因此当前没有能批准本次 CLI 的授权网址；单独登录账户不会完成 CLI 授权。", "  The server did not issue a device code, so there is no approval URL for this CLI session. Signing in alone will not authorize the CLI.")
+	r.format(r.out, "  所选入口的 OAuth 服务暂时不可用：%v\n", "  OAuth is temporarily unavailable at the selected endpoint: %v\n", oauthErr)
+	r.line(r.out, "  旧版 getbeeapi-cli / cli:configure 设备协议已停用，不会降级或跨域重试。", "  The legacy getbeeapi-cli / cli:configure device protocol is retired; the CLI will not downgrade or retry across domains.")
+	r.line(r.out, "  可重新选择另一个 BeeAPI 入口并重新授权，或暂时粘贴单个 API Key。", "  Select another BeeAPI endpoint and authorize again, or temporarily paste one API Key.")
 	r.line(r.out, "  CLI 不会要求或接收 BeeAPI 账户密码。", "  The CLI never asks for or receives your BeeAPI account password.")
 	fallback, askErr := r.askLocalized("  是否改用粘贴 API Key？[Y/n]: ", "  Paste an API Key instead? [Y/n]: ")
 	if askErr != nil && !errors.Is(askErr, io.EOF) {
 		return authorizationResult{}, askErr
 	}
 	if strings.EqualFold(strings.TrimSpace(fallback), "n") {
-		return authorizationResult{}, errors.New(r.text("网站授权未完成", "Browser authorization was not completed"))
+		return authorizationResult{}, errors.New(r.text("OAuth 授权未完成", "OAuth authorization was not completed"))
 	}
 	credentials, pasteErr := r.pasteAPIKey(endpoint)
 	if pasteErr == nil {
@@ -800,18 +784,6 @@ func trustedAuthorizationHost(endpointHost, candidateHost string) bool {
 	return false
 }
 
-func accountLoginURL(endpoint string) string {
-	u, err := url.Parse(endpoint)
-	if err != nil || u.Scheme != "https" || u.Hostname() == "" {
-		return ""
-	}
-	u.Path = "/login"
-	u.RawPath = ""
-	u.RawQuery = ""
-	u.Fragment = ""
-	return u.String()
-}
-
 func (r *runner) pasteAPIKey(endpoint string) ([]credentialMaterial, error) {
 	r.line(r.out, "  兼容模式：请从 BeeAPI 控制台复制 API Key。", "  Compatibility mode: copy an API Key from the BeeAPI dashboard.")
 	r.format(r.out, "  控制台: %s/api-keys\n", "  Dashboard: %s/api-keys\n", endpoint)
@@ -824,108 +796,6 @@ func (r *runner) pasteAPIKey(endpoint string) ([]credentialMaterial, error) {
 		return nil, errors.New(r.text("API Key 不能为空", "API Key is required"))
 	}
 	return []credentialMaterial{{ID: "manual", Name: r.text("手动 API Key", "Manual API Key"), Prefix: safeKeyPrefix(secret), Secret: secret}}, nil
-}
-
-func (r *runner) pollDevice(client *beeapi.Client, code beeapi.DeviceCode) ([]credentialMaterial, error) {
-	interval := code.Interval
-	if interval < 2 {
-		interval = 5
-	}
-	expires := code.ExpiresIn
-	if expires <= 0 {
-		expires = 600
-	}
-	deadline := time.NewTimer(time.Duration(expires) * time.Second)
-	defer deadline.Stop()
-	for {
-		timer := time.NewTimer(time.Duration(interval) * time.Second)
-		select {
-		case <-r.ctx.Done():
-			timer.Stop()
-			return nil, r.ctx.Err()
-		case <-deadline.C:
-			timer.Stop()
-			return nil, errors.New(r.text("设备授权已过期，请重新运行 beeapi", "Device authorization expired; run beeapi again"))
-		case <-timer.C:
-			pollCtx, cancel := context.WithTimeout(r.ctx, 10*time.Second)
-			token, err := client.PollDeviceAuth(pollCtx, code.DeviceCode)
-			cancel()
-			if err != nil {
-				var apiErr *beeapi.APIError
-				if errors.As(err, &apiErr) && apiErr.Reason == "authorization_pending" {
-					continue
-				}
-				if errors.As(err, &apiErr) && apiErr.Reason == "slow_down" {
-					interval += 5
-					continue
-				}
-				return nil, err
-			}
-			if token.Pending {
-				continue
-			}
-			if token.Error != "" {
-				return nil, errors.New(token.Error)
-			}
-			accessToken := token.AccessToken
-			if accessToken == "" {
-				accessToken = token.Token
-			}
-			if accessToken == "" {
-				return nil, errors.New(r.text("设备授权完成，但 BeeAPI 没有返回 CLI 登录令牌", "Authorization completed, but BeeAPI did not return a CLI access token"))
-			}
-			if token.TokenType != "" && !strings.EqualFold(token.TokenType, "DPoP") {
-				return nil, fmt.Errorf(r.text("BeeAPI 返回了不支持的 CLI 令牌类型 %q", "BeeAPI returned unsupported CLI token type %q"), token.TokenType)
-			}
-			client.Token = accessToken
-			claim, claimErr := r.claimDeviceCredentials(client)
-			client.Token = ""
-			if claimErr != nil {
-				return nil, fmt.Errorf(r.text("领取 BeeAPI 设备凭据: %w", "Claim BeeAPI device credentials: %w"), claimErr)
-			}
-			credentials := make([]credentialMaterial, 0, len(claim.Credentials))
-			r.line(r.out, "  ✓ 网站授权完成，已获取账户可用 API Key:", "  ✓ Browser authorization complete. Available account API Keys:")
-			for _, item := range claim.Credentials {
-				name := strings.TrimSpace(item.KeyName)
-				if name == "" {
-					name = strings.TrimSpace(item.ProfileName)
-				}
-				if name == "" {
-					name = strings.TrimSpace(item.DeviceKeyName)
-				}
-				if name == "" {
-					name = "BeeAPI API Key"
-				}
-				prefix := strings.TrimSpace(item.KeyPrefix)
-				if prefix == "" {
-					prefix = strings.TrimSpace(item.DeviceKeyPrefix)
-				}
-				if prefix == "" {
-					prefix = safeKeyPrefix(item.APIKey)
-				}
-				credentialID := item.CredentialID
-				if claim.CredentialMode == "existing_key_export_v2" {
-					credentialID = stableCredentialID(item.APIKey)
-				}
-				fmt.Fprintf(r.out, "    • %s · %s\n", name, prefix)
-				credentials = append(credentials, credentialMaterial{
-					ID: credentialID, Name: name, Prefix: prefix,
-					SourcePrefix: item.SourceKeyPrefix, Secret: item.APIKey,
-				})
-			}
-			if len(claim.Skipped) > 0 {
-				r.line(r.out, "  以下 API Key 当前不可导出，已跳过:", "  The following API Keys cannot be exported and were skipped:")
-				for _, item := range claim.Skipped {
-					name := strings.TrimSpace(item.KeyName)
-					if name == "" {
-						name = r.text("未命名 API Key", "Unnamed API Key")
-					}
-					fmt.Fprintf(r.out, "    • %s · %s · %s\n", name, item.KeyPrefix, r.credentialSkipReason(item.Reason))
-				}
-			}
-			return credentials, nil
-		}
-	}
 }
 
 func stableCredentialID(secret string) string {
@@ -955,32 +825,6 @@ func (r *runner) credentialSkipReason(reason string) string {
 		}
 		return reason
 	}
-}
-
-func (r *runner) claimDeviceCredentials(client *beeapi.Client) (beeapi.CLICredentialClaimResult, error) {
-	var claim beeapi.CLICredentialClaimResult
-	for attempt := 0; attempt < 2; attempt++ {
-		claimCtx, cancel := context.WithTimeout(r.ctx, 15*time.Second)
-		result, err := client.ClaimCLICredentials(claimCtx)
-		cancel()
-		if err == nil {
-			return result, nil
-		}
-		claim = result
-		if attempt != 0 || r.ctx.Err() != nil || !retryableClaimError(err) {
-			return claim, err
-		}
-		r.line(r.out, "  领取响应中断，正在使用幂等窗口安全重试…", "  Credential claim was interrupted; retrying safely within the idempotency window…")
-	}
-	return claim, errors.New(r.text("领取 BeeAPI 设备凭据失败", "Failed to claim BeeAPI device credentials"))
-}
-
-func retryableClaimError(err error) bool {
-	var apiErr *beeapi.APIError
-	if errors.As(err, &apiErr) {
-		return apiErr.Status >= 500
-	}
-	return !errors.Is(err, context.Canceled)
 }
 
 func safeKeyPrefix(secret string) string {

@@ -263,7 +263,7 @@ func TestAuthorizeReusesConnectedOAuthSessionAndRecoversLostExportResponse(t *te
 		out: &output, errOut: &output, store: store,
 	}
 	client := beeapi.New("https://beeapi.dev")
-	_, err := r.saveOAuthSession(beeapi.OAuthMetadata{Issuer: beeapi.OAuthCanonicalIssuer}, beeapi.OAuthToken{
+	_, err := r.saveOAuthSession(beeapi.OAuthMetadata{Issuer: beeapi.OAuthIssuerDev}, beeapi.OAuthToken{
 		AccessToken: "boa_reusable", RefreshToken: "bor_reusable", TokenType: "DPoP", ExpiresIn: 600,
 		Scope: beeapi.OAuthScopeString(beeapi.OAuthAccountScopes),
 	}, client)
@@ -324,6 +324,36 @@ func TestAuthorizeReusesConnectedOAuthSessionAndRecoversLostExportResponse(t *te
 	text := output.String()
 	if !strings.Contains(text, "继续使用此账户") || !strings.Contains(text, "使用同一请求安全恢复") {
 		t.Fatalf("missing OAuth resume/recovery output: %s", text)
+	}
+}
+
+func TestAuthorizeRequiresFreshOAuthWhenTheSelectedIssuerChanges(t *testing.T) {
+	t.Setenv("GETBEE_DISABLE_KEYRING", "1")
+	store := &state.Store{Dir: t.TempDir()}
+	input := strings.NewReader("9\n")
+	var output bytes.Buffer
+	r := &runner{
+		ctx: context.Background(), in: input, reader: bufio.NewReader(input),
+		out: &output, errOut: &output, store: store,
+	}
+	client := beeapi.New(beeapi.OAuthIssuerDev)
+	if _, err := r.saveOAuthSession(beeapi.OAuthMetadata{Issuer: beeapi.OAuthIssuerDev}, beeapi.OAuthToken{
+		AccessToken: "boa_dev", RefreshToken: "bor_dev", TokenType: "DPoP", ExpiresIn: 600,
+		Scope: beeapi.OAuthScopeString(beeapi.OAuthAccountScopes),
+	}, client); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := r.authorize(beeapi.OAuthIssuerAI, false, pendingModeSetup); err == nil || !strings.Contains(err.Error(), "1 或 2") {
+		t.Fatalf("issuer switch did not enter fresh authorization: %v", err)
+	}
+	text := output.String()
+	if !strings.Contains(text, "必须重新进行网页授权") || strings.Contains(text, "继续使用此账户") {
+		t.Fatalf("issuer switch reused the old OAuth session:\n%s", text)
+	}
+	account, secret, err := r.loadOAuthSession()
+	if err != nil || account.Issuer != beeapi.OAuthIssuerDev || secret.Issuer != beeapi.OAuthIssuerDev {
+		t.Fatalf("an aborted issuer switch destroyed the prior session: account=%#v secret=%#v err=%v", account, secret, err)
 	}
 }
 

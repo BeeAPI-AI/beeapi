@@ -179,9 +179,11 @@ func TestDeviceAuthorizationRejectsUntrustedVerificationURL(t *testing.T) {
 	}
 }
 
-func TestUnavailableDeviceAuthorizationShowsLoginPageWithoutClaimingItCanApprove(t *testing.T) {
+func TestUnavailableOAuthNeverDowngradesToTheRetiredDeviceProtocol(t *testing.T) {
 	previousTransport := http.DefaultTransport
+	var requestedPaths []string
 	http.DefaultTransport = appRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		requestedPaths = append(requestedPaths, request.URL.Path)
 		return &http.Response{
 			StatusCode: http.StatusNotFound,
 			Header:     make(http.Header),
@@ -201,18 +203,21 @@ func TestUnavailableDeviceAuthorizationShowsLoginPageWithoutClaimingItCanApprove
 		errOut: &output,
 	}
 	_, err := r.authorize("https://beeapi.dev", false, pendingModeSetup)
-	if err == nil || !strings.Contains(err.Error(), "网站授权未完成") {
+	if err == nil || !strings.Contains(err.Error(), "OAuth 授权未完成") {
 		t.Fatalf("unexpected unavailable authorization result: %v", err)
 	}
 	text := output.String()
 	for _, want := range []string{
-		"BeeAPI 账户登录页: https://beeapi.dev/login",
-		"当前没有能批准本次 CLI 的授权网址",
-		"单独登录账户不会完成 CLI 授权",
+		"旧版 getbeeapi-cli / cli:configure 设备协议已停用",
+		"不会降级或跨域重试",
+		"重新选择另一个 BeeAPI 入口并重新授权",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("unavailable authorization output is missing %q:\n%s", want, text)
 		}
+	}
+	if !reflect.DeepEqual(requestedPaths, []string{"/.well-known/oauth-authorization-server"}) {
+		t.Fatalf("unavailable OAuth unexpectedly called the retired protocol: %#v", requestedPaths)
 	}
 }
 
@@ -855,38 +860,6 @@ func TestCredentialModelDiscoverySkipsOneUnusableKeyWithoutStoppingOthers(t *tes
 	}
 	if !strings.Contains(output.String(), "无路由 Key · 已跳过") {
 		t.Fatalf("unusable-key notice missing:\n%s", output.String())
-	}
-}
-
-func TestCredentialClaimRetriesOneInterruptedResponse(t *testing.T) {
-	client := beeapi.New("https://beeapi.test")
-	client.Token = "bclt-test"
-	requests := 0
-	client.HTTP = &http.Client{Transport: appRoundTripFunc(func(request *http.Request) (*http.Response, error) {
-		requests++
-		if requests == 1 {
-			return nil, errors.New("connection reset")
-		}
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Header:     make(http.Header),
-			Body: io.NopCloser(strings.NewReader(
-				`{"code":0,"message":"success","data":{"credentials":[{"credential_id":"opaque","profile_name":"coding","device_key_prefix":"sk-device","api_key":"sk-device-secret"}],"retry_until":"2026-08-28T12:00:00Z"}}`,
-			)),
-			Request: request,
-		}, nil
-	})}
-	var output bytes.Buffer
-	r := &runner{ctx: context.Background(), out: &output}
-	claim, err := r.claimDeviceCredentials(client)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if requests != 2 || len(claim.Credentials) != 1 || claim.Credentials[0].APIKey != "sk-device-secret" {
-		t.Fatalf("unexpected retry result: requests=%d claim=%#v", requests, claim)
-	}
-	if !strings.Contains(output.String(), "幂等窗口") {
-		t.Fatalf("retry notice missing: %s", output.String())
 	}
 }
 

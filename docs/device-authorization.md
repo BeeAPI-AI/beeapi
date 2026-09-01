@@ -15,21 +15,22 @@ GetBeeAPI 默认使用 **BeeAPI OAuth Account Connection v1**。它负责连接�
 
 OAuth Token 与 P-256 DPoP 私钥存进同一个系统凭据记录；普通 `oauth-account.json` 只保存 issuer、client ID、scope、账户展示信息和凭据引用。API Key 各自进入独立凭据槽。Linux 优先 Secret Service，macOS 优先 Keychain，Windows 优先当前用户 DPAPI；回退文件权限仅限当前用户。
 
-## Canonical issuer 与发现
+## 双 issuer 与发现
 
-唯一 issuer 是：
+两个官方 Web 入口是相互独立的 OAuth 安全域，但共享同一套 BeeAPI 账户、余额、API Key 与路由数据：
 
-```text
-https://beeapi.dev
-```
+| 用户选择的入口 | discovery alias | 必须返回的 issuer |
+| --- | --- | --- |
+| `https://beeapi.ai` | `https://api.beeapi.ai` | `https://beeapi.ai` |
+| `https://beeapi.dev` | `https://api.beeapi.dev` | `https://beeapi.dev` |
 
-`beeapi.ai` 可以提供同一份 discovery 作为入口别名，但返回字段必须全部指向上述 issuer。CLI 严格拒绝其他 issuer、非默认 HTTPS 端口和跨 issuer 授权端点，避免用户选择备用 API 入口后又被带回不可访问的域名，也避免 DPoP `htu` 混淆。
+CLI 从用户选中的入口读取 discovery，并逐字保存返回的 issuer。`api.*` 只允许读取 discovery，且只能永久跳转到同后缀的 canonical issuer；授权、Token、设备码、撤销、批准和账户资源请求都不能发送到 `api.*`。`.ai` 签发的 code、device code、Access/Refresh Token、DPoP replay ID 与 Key export 不能在 `.dev` 重试，反向亦然。切换入口必须重新授权。
 
 ```http
 GET /.well-known/oauth-authorization-server
 ```
 
-关键 metadata：
+关键 metadata（以下以 `.dev` 为例；从 `.ai` 发现时所有域名都必须是 `.ai`）：
 
 ```json
 {
@@ -53,7 +54,8 @@ GET /.well-known/oauth-authorization-server
     "api_keys:export",
     "offline_access"
   ],
-  "dpop_signing_alg_values_supported": ["ES256"]
+  "dpop_signing_alg_values_supported": ["ES256"],
+  "authorization_response_iss_parameter_supported": true
 }
 ```
 
@@ -74,7 +76,7 @@ GET https://beeapi.dev/oauth/authorize
   &platform=<os/arch>
 ```
 
-BeeAPI 登录页安全保留站内授权请求。批准或拒绝后，浏览器回到精确的 loopback URI，并携带 `state` 与 `iss=https://beeapi.dev`。CLI 在接受 `code` 前同时验证 exact path、state 和 issuer；回调页面使用固定 HTML，不反射服务端错误描述，并提醒用户等终端确认“账户已连接”后再结束流程。
+BeeAPI 登录页安全保留站内授权请求。批准或拒绝后，浏览器回到精确的 loopback URI，并携带 `state` 与所选 issuer，例如 `iss=https://beeapi.dev`。CLI 在接受 `code` 前同时验证 exact path、state 和 issuer；`.ai` 流程绝不接受 `.dev` 的 `iss`，反向亦然。回调页面使用固定 HTML，不反射服务端错误描述，并提醒用户等终端确认“账户已连接”后再结束流程。
 
 CLI 随后使用同一枚 DPoP 密钥交换 Token：
 
@@ -128,7 +130,7 @@ Refresh Token 单次使用并轮换，检测 reuse 时撤销整个 family；响�
 
 ## 账户与 Key 资源
 
-每个受保护请求都使用：
+每个受保护请求都使用当前连接 issuer 下的 URL，并据此生成 exact DPoP `htu`：
 
 ```http
 Authorization: DPoP boa_...
@@ -247,8 +249,10 @@ ACK 幂等。ACK 或后续配置中断时，下一次 `beeapi` 从 checkpoint �
 | `oauth.export_unavailable` | 短期恢复窗口已过；若本地未保存则重新授权 |
 | `plaintext_unavailable` | 展示并跳过该 Key |
 
-## 兼容回退
+## 兼容回退与升级
 
-OAuth discovery 返回 `404`、`405`、`501`，或官方入口明确返回前端 SPA HTML / 空 metadata 时，新 CLI 可以临时尝试旧 `getbeeapi-cli + cli:configure` 设备流；用户也可以直接选择粘贴单个 API Key。只要 metadata 已出现任何 OAuth 字段，issuer、端点或 DPoP 能力不可信就必须失败关闭，不能借兼容逻辑降级。OAuth 已被发现后，如果授权被拒绝、DPoP 校验失败或资源请求出错，CLI 不静默降级到权限更宽或安全性更低的方式，而是保留可恢复状态并明确报错。
+旧 `getbeeapi-cli / cli:configure` 设备协议已经退役，新 CLI 不再请求其 JSON device-code、token 或 credentials claim 端点。OAuth discovery 返回 `404`、`405`、`501`、官方前端 SPA HTML 或空 metadata 时，只能提示用户重新选择另一个官方入口并开始一套新授权，或由用户明确选择粘贴单个 API Key；禁止旧协议降级和跨域重试。只要 metadata 已出现任何 OAuth 字段，issuer、端点、回调 issuer 能力或 DPoP 能力不可信就必须失败关闭。
+
+旧客户端 ID `getbeeapi-cli` 与 scope `cli:configure` 由 BeeAPI 服务端拒绝，用户必须升级到使用 `getbeeapi-cli-v2` 的 OAuth 版本。本地旧 OAuth 元数据或缺少 issuer 绑定的令牌记录也不会被复用，升级后需要重新授权；已经保存的普通 `sk-` Key 和工具配置不受影响。
 
 `getbeeapi.com` 只提供产品页、安装器、固定白名单发行缓存与 Release metadata，不承载账户登录、OAuth 回调中转、Token 或 API Key。

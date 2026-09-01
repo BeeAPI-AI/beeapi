@@ -56,6 +56,21 @@ func TestOAuthCallbackReportsAuthorizationDenialWithoutReflectingDescription(t *
 	}
 }
 
+func TestOAuthCallbackRejectsTheOtherOfficialIssuer(t *testing.T) {
+	results := make(chan oauthCallbackResult, 1)
+	handler := oauthCallbackHandler("state", beeapi.OAuthIssuerAI, results)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/oauth/callback?code=code&state=state&iss=https%3A%2F%2Fbeeapi.dev", nil))
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("cross-issuer callback status = %d", recorder.Code)
+	}
+	select {
+	case result := <-results:
+		t.Fatalf("cross-issuer callback delivered a code: %#v", result)
+	default:
+	}
+}
+
 func TestRandomBase64URLProducesIndependentHighEntropyValues(t *testing.T) {
 	first, err := randomBase64URL(32)
 	if err != nil {
@@ -101,7 +116,7 @@ func TestAuthorizationCodeExchangeRecoversLostTokenResponse(t *testing.T) {
 		body := `{"access_token":"boa_recovered","refresh_token":"bor_recovered","token_type":"DPoP","expires_in":300,"scope":"account:profile:read offline_access"}`
 		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: request}, nil
 	})}
-	metadata := beeapi.OAuthMetadata{TokenEndpoint: "https://beeapi.dev/oauth/token"}
+	metadata := beeapi.OAuthMetadata{Issuer: beeapi.OAuthIssuerDev, TokenEndpoint: "https://beeapi.dev/oauth/token"}
 	token, err := r.exchangeOAuthAuthorizationCode(client, metadata, "authorization-code", "http://127.0.0.1:43127/oauth/callback", "pkce-verifier")
 	if err != nil {
 		t.Fatal(err)
@@ -111,5 +126,24 @@ func TestAuthorizationCodeExchangeRecoversLostTokenResponse(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), "同一授权码安全恢复") {
 		t.Fatalf("missing token recovery notice: %s", output.String())
+	}
+}
+
+func TestAuthorizationCodeExchangeDoesNotRetryAcrossIssuerBoundary(t *testing.T) {
+	var output bytes.Buffer
+	r := &runner{ctx: context.Background(), out: &output, errOut: &output}
+	client := beeapi.New(beeapi.OAuthIssuerAI)
+	requests := 0
+	client.HTTP = &http.Client{Transport: appRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		requests++
+		return nil, errors.New("unexpected network request")
+	})}
+	metadata := beeapi.OAuthMetadata{Issuer: beeapi.OAuthIssuerDev, TokenEndpoint: beeapi.OAuthIssuerDev + "/oauth/token"}
+	_, err := r.exchangeOAuthAuthorizationCode(client, metadata, "dev-code", "http://127.0.0.1:43127/oauth/callback", "verifier")
+	if err == nil || !errors.Is(err, beeapi.ErrOAuthIssuerBoundary) {
+		t.Fatalf("cross-issuer code was not rejected: %v", err)
+	}
+	if requests != 0 || strings.Contains(output.String(), "安全恢复") {
+		t.Fatalf("cross-issuer code entered the retry path: requests=%d output=%s", requests, output.String())
 	}
 }

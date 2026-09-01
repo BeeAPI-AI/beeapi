@@ -15,6 +15,7 @@ import (
 const oauthTokenCredentialID = "oauth-account-v1"
 
 type oauthTokenSecret struct {
+	Issuer         string    `json:"issuer"`
 	AccessToken    string    `json:"access_token"`
 	RefreshToken   string    `json:"refresh_token,omitempty"`
 	TokenType      string    `json:"token_type"`
@@ -27,11 +28,16 @@ func (r *runner) saveOAuthSession(metadata beeapi.OAuthMetadata, token beeapi.OA
 	if client == nil {
 		return state.OAuthAccount{}, errors.New(r.text("OAuth 客户端未初始化", "OAuth client is not initialized"))
 	}
+	expectedIssuer, err := beeapi.OAuthIssuerForEntrance(client.BaseURL)
+	if err != nil || !beeapi.IsTrustedOAuthIssuer(metadata.Issuer) || metadata.Issuer != expectedIssuer {
+		return state.OAuthAccount{}, errors.New(r.text("OAuth issuer 与所选入口不匹配", "The OAuth issuer does not match the selected entrance"))
+	}
 	privateJWK, err := client.ExportDPoPPrivateJWK()
 	if err != nil {
 		return state.OAuthAccount{}, err
 	}
 	secret := oauthTokenSecret{
+		Issuer:      metadata.Issuer,
 		AccessToken: strings.TrimSpace(token.AccessToken), RefreshToken: strings.TrimSpace(token.RefreshToken),
 		TokenType: strings.TrimSpace(token.TokenType), Scope: strings.TrimSpace(token.Scope),
 		ExpiresAt: time.Now().UTC().Add(time.Duration(token.ExpiresIn) * time.Second), DPoPPrivateJWK: privateJWK,
@@ -84,7 +90,7 @@ func (r *runner) loadOAuthSession() (state.OAuthAccount, oauthTokenSecret, error
 	if strings.TrimSpace(account.TokenCredentialID) == "" || strings.TrimSpace(account.TokenBackend) == "" {
 		return account, oauthTokenSecret{}, errors.New(r.text("尚未连接 BeeAPI OAuth 账户", "No BeeAPI OAuth account is connected"))
 	}
-	if account.Protocol != beeapi.OAuthAccountProtocol || account.Issuer != beeapi.OAuthCanonicalIssuer || account.ClientID != beeapi.OAuthClientID {
+	if account.SchemaVersion != state.CurrentOAuthAccountVersion || account.Protocol != beeapi.OAuthAccountProtocol || !beeapi.IsTrustedOAuthIssuer(account.Issuer) || account.ClientID != beeapi.OAuthClientID {
 		return account, oauthTokenSecret{}, errors.New(r.text("本地 OAuth 账户元数据不可信，请重新连接", "The local OAuth account metadata is not trusted; reconnect"))
 	}
 	raw, err := r.store.LoadNamedCredential(account.TokenBackend, account.TokenCredentialID)
@@ -94,6 +100,9 @@ func (r *runner) loadOAuthSession() (state.OAuthAccount, oauthTokenSecret, error
 	var secret oauthTokenSecret
 	if err := json.Unmarshal([]byte(raw), &secret); err != nil {
 		return account, secret, fmt.Errorf(r.text("解析 OAuth 会话: %w", "Decode OAuth session: %w"), err)
+	}
+	if strings.TrimSpace(secret.Issuer) != account.Issuer {
+		return account, oauthTokenSecret{}, errors.New(r.text("本地 OAuth Token 与 issuer 不匹配，请重新连接", "The local OAuth token does not match its issuer; reconnect"))
 	}
 	if !strings.HasPrefix(strings.TrimSpace(secret.AccessToken), "boa_") || !strings.EqualFold(strings.TrimSpace(secret.TokenType), "DPoP") || strings.TrimSpace(secret.DPoPPrivateJWK) == "" {
 		return account, oauthTokenSecret{}, errors.New(r.text("本地 OAuth 会话不完整，请重新连接", "The local OAuth session is incomplete; reconnect"))

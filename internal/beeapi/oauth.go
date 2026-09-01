@@ -18,16 +18,20 @@ import (
 const (
 	OAuthAccountProtocol = "beeapi-oauth-account-v1"
 	OAuthClientID        = "getbeeapi-cli-v2"
-	OAuthCanonicalIssuer = "https://beeapi.dev"
+	OAuthIssuerAI        = "https://beeapi.ai"
+	OAuthIssuerDev       = "https://beeapi.dev"
 	OAuthDeviceGrant     = "urn:ietf:params:oauth:grant-type:device_code"
 )
 
 // ErrOAuthDiscoveryUnavailable marks an official endpoint that serves its SPA
 // fallback (or an empty metadata document) because OAuth discovery has not
-// been deployed there yet. Callers may use the legacy device flow for this
-// narrow rollout case; untrusted or partially invalid metadata still fails
-// closed through validateOAuthMetadata.
-var ErrOAuthDiscoveryUnavailable = errors.New("BeeAPI OAuth discovery is unavailable")
+// been deployed there yet. Callers may offer manual API Key entry, but must
+// never downgrade to the retired getbeeapi-cli / cli:configure protocol.
+// Untrusted or partially invalid metadata still fails closed.
+var (
+	ErrOAuthDiscoveryUnavailable = errors.New("BeeAPI OAuth discovery is unavailable")
+	ErrOAuthIssuerBoundary       = errors.New("BeeAPI OAuth issuer boundary violation")
+)
 
 var OAuthAccountScopes = []string{
 	"account:profile:read",
@@ -49,6 +53,7 @@ type OAuthMetadata struct {
 	TokenAuthMethods            []string `json:"token_endpoint_auth_methods_supported"`
 	ScopesSupported             []string `json:"scopes_supported"`
 	DPoPSigningAlgorithms       []string `json:"dpop_signing_alg_values_supported"`
+	AuthorizationResponseIssuer bool     `json:"authorization_response_iss_parameter_supported"`
 }
 
 type OAuthToken struct {
@@ -61,8 +66,12 @@ type OAuthToken struct {
 
 func (c *Client) OAuthMetadata(ctx context.Context) (OAuthMetadata, error) {
 	var metadata OAuthMetadata
+	expectedIssuer, err := OAuthIssuerForEntrance(c.BaseURL)
+	if err != nil {
+		return metadata, err
+	}
 	target := strings.TrimRight(c.BaseURL, "/") + "/.well-known/oauth-authorization-server"
-	if err := c.oauthJSONRequest(ctx, http.MethodGet, target, nil, "", &metadata); err != nil {
+	if err := c.oauthDiscoveryRequest(ctx, target, expectedIssuer, &metadata); err != nil {
 		var syntaxErr *json.SyntaxError
 		if errors.As(err, &syntaxErr) {
 			return OAuthMetadata{}, fmt.Errorf("%w: endpoint did not return JSON", ErrOAuthDiscoveryUnavailable)
@@ -83,27 +92,25 @@ func (c *Client) OAuthMetadata(ctx context.Context) (OAuthMetadata, error) {
 }
 
 func validateOAuthMetadata(baseURL string, metadata OAuthMetadata) error {
-	if strings.TrimRight(strings.TrimSpace(metadata.Issuer), "/") != OAuthCanonicalIssuer || strings.TrimSpace(metadata.Issuer) != OAuthCanonicalIssuer {
-		return fmt.Errorf("BeeAPI OAuth issuer must be %s", OAuthCanonicalIssuer)
-	}
-	if err := validateTrustedOAuthURL(baseURL, metadata.Issuer, "issuer"); err != nil {
+	expectedIssuer, err := OAuthIssuerForEntrance(baseURL)
+	if err != nil {
 		return err
 	}
-	for label, raw := range map[string]string{
-		"authorization_endpoint":        metadata.AuthorizationEndpoint,
-		"token_endpoint":                metadata.TokenEndpoint,
-		"device_authorization_endpoint": metadata.DeviceAuthorizationEndpoint,
-		"revocation_endpoint":           metadata.RevocationEndpoint,
+	if strings.TrimSpace(metadata.Issuer) != expectedIssuer {
+		return fmt.Errorf("%w: issuer must match the selected entrance %s", ErrOAuthIssuerBoundary, expectedIssuer)
+	}
+	for _, endpoint := range []struct {
+		label string
+		raw   string
+		path  string
+	}{
+		{label: "authorization_endpoint", raw: metadata.AuthorizationEndpoint, path: "/oauth/authorize"},
+		{label: "token_endpoint", raw: metadata.TokenEndpoint, path: "/oauth/token"},
+		{label: "device_authorization_endpoint", raw: metadata.DeviceAuthorizationEndpoint, path: "/oauth/device/code"},
+		{label: "revocation_endpoint", raw: metadata.RevocationEndpoint, path: "/oauth/revoke"},
 	} {
-		if strings.TrimSpace(raw) == "" && label == "device_authorization_endpoint" {
-			continue
-		}
-		if err := validateTrustedOAuthURL(baseURL, raw, label); err != nil {
+		if err := validateOAuthEndpointURL(expectedIssuer, endpoint.raw, endpoint.label, endpoint.path); err != nil {
 			return err
-		}
-		parsed, _ := url.Parse(strings.TrimSpace(raw))
-		if parsed.Scheme+"://"+parsed.Host != OAuthCanonicalIssuer {
-			return fmt.Errorf("BeeAPI OAuth %s must use canonical issuer %s", label, OAuthCanonicalIssuer)
 		}
 	}
 	if !containsOAuthValue(metadata.ResponseTypesSupported, "code") || !containsOAuthValue(metadata.GrantTypesSupported, "authorization_code") {
@@ -112,40 +119,91 @@ func validateOAuthMetadata(baseURL string, metadata OAuthMetadata) error {
 	if !containsOAuthValue(metadata.CodeChallengeMethods, "S256") {
 		return errors.New("BeeAPI OAuth metadata does not require PKCE S256")
 	}
-	if len(metadata.TokenAuthMethods) > 0 && !containsOAuthValue(metadata.TokenAuthMethods, "none") {
+	if !containsOAuthValue(metadata.TokenAuthMethods, "none") {
 		return errors.New("BeeAPI OAuth metadata does not support a public CLI client")
 	}
 	if !containsOAuthValue(metadata.GrantTypesSupported, "refresh_token") {
 		return errors.New("BeeAPI OAuth metadata does not support refresh token rotation")
 	}
+	if !containsOAuthValue(metadata.GrantTypesSupported, OAuthDeviceGrant) {
+		return errors.New("BeeAPI OAuth metadata does not support the device grant required for headless clients")
+	}
 	if !containsOAuthValue(metadata.DPoPSigningAlgorithms, "ES256") {
 		return errors.New("BeeAPI OAuth metadata does not support DPoP ES256")
 	}
-	for _, scope := range OAuthAccountScopes {
-		if !containsOAuthValue(metadata.ScopesSupported, scope) {
-			return fmt.Errorf("BeeAPI OAuth metadata does not support required scope %s", scope)
+	if !metadata.AuthorizationResponseIssuer {
+		return errors.New("BeeAPI OAuth metadata does not require the authorization response issuer parameter")
+	}
+	if len(metadata.ScopesSupported) > 0 {
+		for _, scope := range OAuthAccountScopes {
+			if !containsOAuthValue(metadata.ScopesSupported, scope) {
+				return fmt.Errorf("BeeAPI OAuth metadata does not support required scope %s", scope)
+			}
 		}
 	}
 	return nil
 }
 
-func validateTrustedOAuthURL(baseURL, raw, label string) error {
+// OAuthIssuerForEntrance maps an official web entrance or discovery-only
+// api.* alias to its independent OAuth security domain.
+func OAuthIssuerForEntrance(raw string) (string, error) {
 	parsed, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.User != nil || parsed.Fragment != "" || parsed.Port() != "" {
+	if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.User != nil || parsed.Port() != "" || parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") {
+		return "", fmt.Errorf("%w: entrance is not a valid HTTPS root URL", ErrOAuthIssuerBoundary)
+	}
+	switch strings.ToLower(strings.TrimSuffix(parsed.Hostname(), ".")) {
+	case "beeapi.ai", "api.beeapi.ai":
+		return OAuthIssuerAI, nil
+	case "beeapi.dev", "api.beeapi.dev":
+		return OAuthIssuerDev, nil
+	default:
+		return "", fmt.Errorf("%w: entrance is not an official trusted domain", ErrOAuthIssuerBoundary)
+	}
+}
+
+func IsTrustedOAuthIssuer(raw string) bool {
+	raw = strings.TrimSpace(raw)
+	return raw == OAuthIssuerAI || raw == OAuthIssuerDev
+}
+
+func validateOAuthEndpointURL(issuer, raw, label, expectedPath string) error {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.User != nil || parsed.Port() != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return fmt.Errorf("BeeAPI OAuth %s is not a valid HTTPS URL", label)
 	}
-	base, err := url.Parse(baseURL)
-	if err != nil || base.Hostname() == "" {
-		return errors.New("BeeAPI base URL is invalid")
+	if parsed.Scheme+"://"+parsed.Host != issuer {
+		return fmt.Errorf("%w: %s must use selected issuer %s", ErrOAuthIssuerBoundary, label, issuer)
 	}
-	for _, endpoint := range BootstrapEndpoints {
-		trusted, parseErr := url.Parse(endpoint)
-		if parseErr == nil && strings.EqualFold(trusted.Hostname(), parsed.Hostname()) {
-			return nil
-		}
+	if parsed.Path != expectedPath {
+		return fmt.Errorf("%w: %s must use path %s", ErrOAuthIssuerBoundary, label, expectedPath)
 	}
-	_ = base
-	return fmt.Errorf("BeeAPI OAuth %s host is not trusted", label)
+	return nil
+}
+
+func validateSensitiveOAuthTarget(baseURL, target string) error {
+	issuer, err := OAuthIssuerForEntrance(baseURL)
+	if err != nil {
+		return err
+	}
+	parsed, err := url.Parse(strings.TrimSpace(target))
+	if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.User != nil || parsed.Port() != "" || parsed.Fragment != "" {
+		return fmt.Errorf("%w: credential target is not a valid HTTPS URL", ErrOAuthIssuerBoundary)
+	}
+	if parsed.Scheme+"://"+parsed.Host != issuer {
+		return fmt.Errorf("%w: credentials cannot cross issuers; want %s", ErrOAuthIssuerBoundary, issuer)
+	}
+	return nil
+}
+
+func validateOAuthOperationEndpoint(baseURL string, metadata OAuthMetadata, raw, label, expectedPath string) error {
+	issuer, err := OAuthIssuerForEntrance(baseURL)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(metadata.Issuer) != issuer {
+		return fmt.Errorf("%w: operation metadata issuer must be %s", ErrOAuthIssuerBoundary, issuer)
+	}
+	return validateOAuthEndpointURL(issuer, raw, label, expectedPath)
 }
 
 func (m OAuthMetadata) SupportsDeviceGrant() bool {
@@ -178,6 +236,12 @@ func BuildAuthorizationURL(metadata OAuthMetadata, redirectURI, state, codeChall
 	if strings.TrimSpace(state) == "" || strings.TrimSpace(codeChallenge) == "" {
 		return "", errors.New("OAuth state and PKCE challenge are required")
 	}
+	if !IsTrustedOAuthIssuer(strings.TrimSpace(metadata.Issuer)) {
+		return "", fmt.Errorf("%w: authorization issuer is not trusted", ErrOAuthIssuerBoundary)
+	}
+	if err := validateOAuthEndpointURL(metadata.Issuer, metadata.AuthorizationEndpoint, "authorization_endpoint", "/oauth/authorize"); err != nil {
+		return "", err
+	}
 	redirect, err := url.Parse(redirectURI)
 	if err != nil || redirect.Scheme != "http" || redirect.Hostname() != "127.0.0.1" || redirect.Port() == "" || redirect.Path != "/oauth/callback" {
 		return "", errors.New("OAuth desktop redirect must use http://127.0.0.1:<port>/oauth/callback")
@@ -205,6 +269,9 @@ func BuildAuthorizationURL(metadata OAuthMetadata, redirectURI, state, codeChall
 
 func (c *Client) StartOAuthDeviceAuth(ctx context.Context, metadata OAuthMetadata, scopes []string) (DeviceCode, error) {
 	var code DeviceCode
+	if err := validateOAuthOperationEndpoint(c.BaseURL, metadata, metadata.DeviceAuthorizationEndpoint, "device_authorization_endpoint", "/oauth/device/code"); err != nil {
+		return code, err
+	}
 	deviceName, _ := os.Hostname()
 	values := url.Values{
 		"client_id":   {OAuthClientID},
@@ -219,6 +286,9 @@ func (c *Client) StartOAuthDeviceAuth(ctx context.Context, metadata OAuthMetadat
 }
 
 func (c *Client) PollOAuthDeviceToken(ctx context.Context, metadata OAuthMetadata, deviceCode string) (OAuthToken, error) {
+	if err := validateOAuthOperationEndpoint(c.BaseURL, metadata, metadata.TokenEndpoint, "token_endpoint", "/oauth/token"); err != nil {
+		return OAuthToken{}, err
+	}
 	values := url.Values{
 		"grant_type":  {OAuthDeviceGrant},
 		"client_id":   {OAuthClientID},
@@ -232,6 +302,9 @@ func (c *Client) PollOAuthDeviceToken(ctx context.Context, metadata OAuthMetadat
 }
 
 func (c *Client) ExchangeAuthorizationCode(ctx context.Context, metadata OAuthMetadata, code, redirectURI, verifier string) (OAuthToken, error) {
+	if err := validateOAuthOperationEndpoint(c.BaseURL, metadata, metadata.TokenEndpoint, "token_endpoint", "/oauth/token"); err != nil {
+		return OAuthToken{}, err
+	}
 	values := url.Values{
 		"grant_type":    {"authorization_code"},
 		"client_id":     {OAuthClientID},
@@ -247,6 +320,9 @@ func (c *Client) ExchangeAuthorizationCode(ctx context.Context, metadata OAuthMe
 }
 
 func (c *Client) RefreshOAuthToken(ctx context.Context, metadata OAuthMetadata, refreshToken string) (OAuthToken, error) {
+	if err := validateOAuthOperationEndpoint(c.BaseURL, metadata, metadata.TokenEndpoint, "token_endpoint", "/oauth/token"); err != nil {
+		return OAuthToken{}, err
+	}
 	values := url.Values{
 		"grant_type":    {"refresh_token"},
 		"client_id":     {OAuthClientID},
@@ -260,6 +336,9 @@ func (c *Client) RefreshOAuthToken(ctx context.Context, metadata OAuthMetadata, 
 }
 
 func (c *Client) RevokeOAuthToken(ctx context.Context, metadata OAuthMetadata, token, hint string) error {
+	if err := validateOAuthOperationEndpoint(c.BaseURL, metadata, metadata.RevocationEndpoint, "revocation_endpoint", "/oauth/revoke"); err != nil {
+		return err
+	}
 	values := url.Values{"client_id": {OAuthClientID}, "token": {strings.TrimSpace(token)}}
 	if strings.TrimSpace(hint) != "" {
 		values.Set("token_type_hint", strings.TrimSpace(hint))
@@ -291,6 +370,9 @@ func validateOAuthToken(token OAuthToken) (OAuthToken, error) {
 }
 
 func (c *Client) oauthFormRequest(ctx context.Context, target string, values url.Values, accessToken string, out any) error {
+	if err := validateSensitiveOAuthTarget(c.BaseURL, target); err != nil {
+		return err
+	}
 	body := strings.NewReader(values.Encode())
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, body)
 	if err != nil {
@@ -311,36 +393,63 @@ func (c *Client) oauthFormRequest(ctx context.Context, target string, values url
 		return err
 	}
 	req.Header.Set("DPoP", proof)
-	return c.doOAuthRequest(req, out)
+	return c.doOAuthRequestNoRedirect(req, out)
 }
 
-func (c *Client) oauthJSONRequest(ctx context.Context, method, target string, body io.Reader, accessToken string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, method, target, body)
+func (c *Client) oauthDiscoveryRequest(ctx context.Context, target, expectedIssuer string, out any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "beeapi-cli/2")
-	if accessToken != "" {
-		req.Header.Set("Authorization", "DPoP "+accessToken)
-		signer, signerErr := c.ensureDPoP()
-		if signerErr != nil {
-			return signerErr
+	client := cloneHTTPClient(c.HTTP)
+	client.CheckRedirect = func(next *http.Request, via []*http.Request) error {
+		canonicalDiscovery := expectedIssuer + "/.well-known/oauth-authorization-server"
+		if len(via) != 1 || next.Method != http.MethodGet || next.URL.String() != canonicalDiscovery {
+			return errors.New("BeeAPI OAuth discovery attempted an untrusted redirect")
 		}
-		proof, proofErr := signer.proof(method, target, accessToken, time.Now())
-		if proofErr != nil {
-			return proofErr
-		}
-		req.Header.Set("DPoP", proof)
+		return nil
 	}
-	return c.doOAuthRequest(req, out)
+	return c.doOAuthRequestWithClient(client, req, out)
 }
 
-func (c *Client) doOAuthRequest(req *http.Request, out any) error {
-	resp, err := c.HTTP.Do(req)
+func (c *Client) doOAuthRequestNoRedirect(req *http.Request, out any) error {
+	resp, err := c.doNoRedirect(req)
 	if err != nil {
 		return err
 	}
+	return decodeOAuthResponse(resp, out)
+}
+
+func (c *Client) doOAuthRequestWithClient(client *http.Client, req *http.Request, out any) error {
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	return decodeOAuthResponse(resp, out)
+}
+
+func (c *Client) doNoRedirect(req *http.Request) (*http.Response, error) {
+	client := cloneHTTPClient(c.HTTP)
+	client.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return client.Do(req)
+}
+
+func cloneHTTPClient(client *http.Client) *http.Client {
+	if client == nil {
+		client = http.DefaultClient
+	}
+	clone := *client
+	return &clone
+}
+
+func decodeOAuthResponse(resp *http.Response, out any) error {
 	defer resp.Body.Close()
 	b, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if err != nil {

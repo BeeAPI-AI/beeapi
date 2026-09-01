@@ -50,11 +50,11 @@ CLI 内置 `beeapi.ai` 与 `beeapi.dev` 作为引导入口。它先并发请求�
 
 ## 登录与凭据
 
-默认采用 [OAuth 账户连接](device-authorization.md)，canonical issuer 固定为 `https://beeapi.dev`。桌面环境使用 Authorization Code + PKCE（S256）和随机 `127.0.0.1` loopback 回调；SSH 或无桌面环境使用标准 Device Authorization Grant，并始终在终端显示完整验证网址与用户码。两种方式签发同一种短期 DPoP Account Token 与轮换 Refresh Token。CLI 不接触用户名、密码、2FA 验证码或网页 Cookie。
+默认采用 [OAuth 账户连接](device-authorization.md)。`https://beeapi.ai` 与 `https://beeapi.dev` 是独立 issuer：CLI 根据用户选择的入口读取对应 discovery，保存返回的 issuer，并让授权、Token、设备码、撤销、账户资源和 DPoP `htu` 全部停留在该安全域。`api.beeapi.ai` 与 `api.beeapi.dev` 只作为各自 issuer 的 discovery alias。桌面环境使用 Authorization Code + PKCE（S256）和随机 `127.0.0.1` loopback 回调；SSH 或无桌面环境使用标准 Device Authorization Grant，并始终在终端显示完整验证网址与用户码。CLI 不接触用户名、密码、2FA 验证码或网页 Cookie。
 
 账户 Token 只允许读取获准的账户资料、当前余额、API Key 元数据和每枚 Key 的模型能力，不能访问 `/v1` / `/v1beta` 模型代理。CLI 保留 BeeAPI 返回的 Key 与模型排序，让用户先在终端选择 Key；只有选中的 Key 才通过高敏 `api_keys:export` scope 进入短期、幂等的一次性导出。授权码交换、Refresh 轮换与 Key 导出在响应丢失时分别复用原 code、Refresh Token 或 Idempotency-Key 恢复同一结果。CLI 收到明文后先写入系统凭据存储和可续接 checkpoint，再 ACK 服务端，最后才进入工具配置；恢复 checkpoint 时也会先验证所有本地 Key 可读，再处理 ACK。账户 Token 或 Key 已保存后，后续步骤中断可直接继续，不要求重复网页授权。刷新后的长期会话不保留导出权限，后续领取新 Key 必须重新交互授权。
 
-如果服务端尚未发布 OAuth Account v1，CLI 可临时尝试旧设备授权；用户也可以主动选择粘贴单个 API Key。输入尽量关闭终端回显。任何模式都不在普通配置 JSON 中保存 Token、Refresh Token、DPoP 私钥或 API Key 明文。
+旧 `getbeeapi-cli / cli:configure` 设备协议不再回退。若所选 issuer 暂未提供 OAuth，用户需要重新选择另一个入口并重新授权，或主动选择粘贴单个 API Key。输入尽量关闭终端回显。任何模式都不在普通配置 JSON 中保存 Token、Refresh Token、DPoP 私钥或 API Key 明文。
 
 凭据保存顺序：
 
@@ -62,7 +62,7 @@ CLI 内置 `beeapi.ai` 与 `beeapi.dev` 作为引导入口。它先并发请求�
 - macOS：Keychain，否则权限 `0600` 文件。
 - Windows：当前用户 DPAPI，否则受保护文件。
 
-OAuth 会话优先从账户资源读取当前余额；旧连接回退 API Key 鉴权的 `GET /v1/usage`。这些接口只查询钱包和 Key 元数据，不经过模型路由且不计费。首页缓存 30 秒；“密钥与余额”页面同时展示账户余额与全部本地 Key 的可用状态，不输出 Key 明文。
+OAuth 会话优先从账户资源读取当前余额；仅粘贴 API Key 的连接使用 API Key 鉴权的 `GET /v1/usage`。这些接口只查询钱包和 Key 元数据，不经过模型路由且不计费。首页缓存 30 秒；“密钥与余额”页面同时展示账户余额与全部本地 Key 的可用状态，不输出 Key 明文。
 
 ## 命名配置方案与切换
 

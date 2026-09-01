@@ -17,7 +17,7 @@ func TestDPoPProofIsES256RequestAndTokenBound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	proof, err := signer.proof("post", "https://beeapi.test/api/v1/cli/credentials/claim", "bclt_test", time.Unix(1_700_000_000, 0))
+	proof, err := signer.proof("post", "https://beeapi.dev/api/v1/oauth/api-key-exports", "boa_test", time.Unix(1_700_000_000, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,10 +42,10 @@ func TestDPoPProofIsES256RequestAndTokenBound(t *testing.T) {
 	}
 	var claims map[string]any
 	decodeJWTJSON(t, parts[1], &claims)
-	if claims["htm"] != "POST" || claims["htu"] != "https://beeapi.test/api/v1/cli/credentials/claim" {
+	if claims["htm"] != "POST" || claims["htu"] != "https://beeapi.dev/api/v1/oauth/api-key-exports" {
 		t.Fatalf("unexpected request binding: %#v", claims)
 	}
-	digest := sha256.Sum256([]byte("bclt_test"))
+	digest := sha256.Sum256([]byte("boa_test"))
 	if claims["ath"] != base64.RawURLEncoding.EncodeToString(digest[:]) {
 		t.Fatalf("unexpected access-token hash: %#v", claims["ath"])
 	}

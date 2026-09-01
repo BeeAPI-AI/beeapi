@@ -9,8 +9,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
-	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -61,7 +59,6 @@ type proofMode uint8
 
 const (
 	proofNone proofMode = iota
-	proofPublic
 	proofProtected
 )
 
@@ -74,6 +71,9 @@ func (c *Client) requestWithProof(ctx context.Context, method, path string, body
 }
 
 func (c *Client) requestWithProofHeaders(ctx context.Context, method, path string, body, out any, mode proofMode, headers http.Header) error {
+	if mode != proofNone && strings.HasPrefix(path, "/oauth/") && !IsTrustedOAuthIssuer(c.BaseURL) {
+		return fmt.Errorf("%w: account resources require the exact selected issuer; discovery aliases are not allowed", ErrOAuthIssuerBoundary)
+	}
 	var payload io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -118,7 +118,12 @@ func (c *Client) requestWithProofHeaders(ctx context.Context, method, path strin
 	} else if c.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.Token)
 	}
-	resp, err := c.HTTP.Do(req)
+	var resp *http.Response
+	if mode == proofNone {
+		resp, err = c.HTTP.Do(req)
+	} else {
+		resp, err = c.doNoRedirect(req)
+	}
 	if err != nil {
 		return err
 	}
@@ -378,90 +383,6 @@ type DeviceCode struct {
 	CompleteURI     string `json:"verification_uri_complete"`
 	ExpiresIn       int    `json:"expires_in"`
 	Interval        int    `json:"interval"`
-}
-
-type DeviceToken struct {
-	AccessToken string `json:"access_token"`
-	Token       string `json:"token"`
-	TokenType   string `json:"token_type"`
-	ExpiresIn   int    `json:"expires_in"`
-	Scope       string `json:"scope"`
-	Pending     bool   `json:"pending"`
-	Error       string `json:"error"`
-	Interval    int    `json:"interval"`
-}
-
-func (c *Client) StartDeviceAuth(ctx context.Context) (DeviceCode, error) {
-	var code DeviceCode
-	deviceName, _ := os.Hostname()
-	err := c.requestWithProof(ctx, http.MethodPost, "/auth/device/code", map[string]any{
-		"client_id":   "getbeeapi-cli",
-		"scope":       "cli:configure",
-		"device_name": deviceName,
-		"platform":    runtime.GOOS + "/" + runtime.GOARCH,
-	}, &code, proofPublic)
-	return code, err
-}
-
-func (c *Client) PollDeviceAuth(ctx context.Context, deviceCode string) (DeviceToken, error) {
-	var token DeviceToken
-	err := c.requestWithProof(ctx, http.MethodPost, "/auth/device/token", map[string]string{
-		"client_id":   "getbeeapi-cli",
-		"device_code": deviceCode,
-	}, &token, proofPublic)
-	return token, err
-}
-
-// CLICredential is an existing account API key exported after the user
-// approves the device. The legacy device-key fields remain readable so a
-// newer CLI can still consume responses from the v1 device-key rollout.
-type CLICredential struct {
-	CredentialID string     `json:"credential_id"`
-	KeyName      string     `json:"key_name"`
-	KeyPrefix    string     `json:"key_prefix"`
-	Status       string     `json:"status"`
-	ExpiresAt    *time.Time `json:"expires_at"`
-	// Legacy device_key_v1 fields.
-	ProfileName     string `json:"profile_name"`
-	SourceKeyPrefix string `json:"source_key_prefix"`
-	DeviceKeyName   string `json:"device_key_name"`
-	DeviceKeyPrefix string `json:"device_key_prefix"`
-	APIKey          string `json:"api_key"`
-}
-
-type CLICredentialSkip struct {
-	CredentialID string     `json:"credential_id"`
-	KeyName      string     `json:"key_name"`
-	KeyPrefix    string     `json:"key_prefix"`
-	Status       string     `json:"status"`
-	ExpiresAt    *time.Time `json:"expires_at"`
-	Reason       string     `json:"reason"`
-}
-
-type CLICredentialClaimResult struct {
-	CredentialMode string              `json:"credential_mode"`
-	Credentials    []CLICredential     `json:"credentials"`
-	Skipped        []CLICredentialSkip `json:"skipped"`
-	RetryUntil     time.Time           `json:"retry_until"`
-}
-
-func (c *Client) ClaimCLICredentials(ctx context.Context) (CLICredentialClaimResult, error) {
-	var result CLICredentialClaimResult
-	if err := c.requestWithProof(ctx, http.MethodPost, "/cli/credentials/claim", map[string]string{}, &result, proofProtected); err != nil {
-		return result, err
-	}
-	if len(result.Credentials) == 0 {
-		if len(result.Skipped) > 0 {
-			return result, errors.New("BeeAPI 账户中没有可导出的可用 API Key")
-		}
-		return result, errors.New("BeeAPI 没有返回可用 API Key")
-	}
-	for _, credential := range result.Credentials {
-		if strings.TrimSpace(credential.CredentialID) == "" || strings.TrimSpace(credential.APIKey) == "" {
-			return CLICredentialClaimResult{}, errors.New("BeeAPI 返回的设备凭据不完整")
-		}
-	}
-	return result, nil
 }
 
 type Model struct {
