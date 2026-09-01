@@ -1,0 +1,150 @@
+package updater
+
+import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
+	"context"
+	"crypto/sha256"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+type updaterRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn updaterRoundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return fn(request)
+}
+
+func updaterResponse(request *http.Request, status int, body []byte) *http.Response {
+	return &http.Response{StatusCode: status, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(body)), Request: request}
+}
+
+func TestSemanticVersionComparison(t *testing.T) {
+	for _, test := range []struct {
+		latest, current string
+		newer           bool
+	}{
+		{"v0.3.0", "v0.2.9", true},
+		{"v1.0.0", "0.99.99", true},
+		{"v1.0.0", "v1.0.0-rc.1", true},
+		{"v1.0.0-rc.2", "v1.0.0-rc.10", false},
+		{"v1.0.0", "v1.0.0", false},
+		{"v0.2.0", "dev", false},
+	} {
+		if got := IsNewer(test.latest, test.current); got != test.newer {
+			t.Fatalf("IsNewer(%q, %q) = %v, want %v", test.latest, test.current, got, test.newer)
+		}
+	}
+}
+
+func TestInstallDownloadsChecksumVerifiesAndAtomicallyReplaces(t *testing.T) {
+	archive := tarGzFixture(t, "beeapi", []byte("new-beeapi-binary"))
+	digest := sha256.Sum256(archive)
+	httpClient := &http.Client{Transport: updaterRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		switch {
+		case strings.HasSuffix(request.URL.Path, ".tar.gz"):
+			return updaterResponse(request, http.StatusOK, archive), nil
+		case strings.HasSuffix(request.URL.Path, ".sha256"):
+			return updaterResponse(request, http.StatusOK, []byte(fmt.Sprintf("%x\n", digest))), nil
+		default:
+			return updaterResponse(request, http.StatusNotFound, nil), nil
+		}
+	})}
+
+	target := filepath.Join(t.TempDir(), "beeapi")
+	if err := os.WriteFile(target, []byte("old-binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	client := &Client{
+		HTTP: httpClient, DownloadBases: []string{"https://updates.test/releases/{version}/download"},
+		GOOS: "linux", GOARCH: "amd64",
+	}
+	result, err := client.Install(context.Background(), Release{TagName: "v1.2.3"}, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "new-beeapi-binary" || result.Version != "v1.2.3" || result.Scheduled {
+		t.Fatalf("unexpected install result: result=%#v body=%q", result, body)
+	}
+}
+
+func TestInstallRejectsChecksumMismatchAndPreservesExecutable(t *testing.T) {
+	archive := tarGzFixture(t, "beeapi", []byte("untrusted-binary"))
+	httpClient := &http.Client{Transport: updaterRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if strings.HasSuffix(request.URL.Path, ".sha256") {
+			return updaterResponse(request, http.StatusOK, []byte(strings.Repeat("0", 64))), nil
+		}
+		return updaterResponse(request, http.StatusOK, archive), nil
+	})}
+	target := filepath.Join(t.TempDir(), "beeapi")
+	if err := os.WriteFile(target, []byte("trusted-old-binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	client := &Client{
+		HTTP: httpClient, DownloadBases: []string{"https://updates.test/{version}"},
+		GOOS: "linux", GOARCH: "amd64",
+	}
+	if _, err := client.Install(context.Background(), Release{TagName: "v1.2.3"}, target); err == nil || !strings.Contains(err.Error(), "SHA-256") {
+		t.Fatalf("unexpected mismatch result: %v", err)
+	}
+	body, _ := os.ReadFile(target)
+	if string(body) != "trusted-old-binary" {
+		t.Fatalf("checksum failure replaced the executable: %q", body)
+	}
+}
+
+func TestArchiveRequiresExactRootExecutable(t *testing.T) {
+	archive := tarGzFixture(t, "../../beeapi", []byte("malicious"))
+	path := filepath.Join(t.TempDir(), "release.tar.gz")
+	if err := os.WriteFile(path, archive, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := extractTarGzBinary(path, "beeapi", filepath.Join(t.TempDir(), "beeapi"))
+	if err == nil || !strings.Contains(err.Error(), "missing") {
+		t.Fatalf("unsafe archive entry was accepted: %v", err)
+	}
+}
+
+func TestLatestFallsBackToSecondMetadataSource(t *testing.T) {
+	httpClient := &http.Client{Transport: updaterRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Path == "/first" {
+			return updaterResponse(request, http.StatusBadGateway, []byte("unavailable")), nil
+		}
+		return updaterResponse(request, http.StatusOK, []byte(`{"tag_name":"v2.0.1","published_at":"2026-09-01T00:00:00Z"}`)), nil
+	})}
+	client := &Client{HTTP: httpClient, MetadataURLs: []string{"https://updates.test/first", "https://updates.test/second"}}
+	release, err := client.Latest(context.Background())
+	if err != nil || release.TagName != "v2.0.1" {
+		t.Fatalf("unexpected release: %#v, err=%v", release, err)
+	}
+}
+
+func tarGzFixture(t *testing.T, name string, body []byte) []byte {
+	t.Helper()
+	var buffer bytes.Buffer
+	gzipWriter := gzip.NewWriter(&buffer)
+	tarWriter := tar.NewWriter(gzipWriter)
+	if err := tarWriter.WriteHeader(&tar.Header{Name: name, Mode: 0o755, Size: int64(len(body)), Typeflag: tar.TypeReg}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tarWriter.Write(body); err != nil {
+		t.Fatal(err)
+	}
+	if err := tarWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gzipWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buffer.Bytes()
+}

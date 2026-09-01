@@ -22,22 +22,25 @@ import (
 	"github.com/BeeAPI-AI/beeapi/internal/configurator"
 	"github.com/BeeAPI-AI/beeapi/internal/routeopt"
 	"github.com/BeeAPI-AI/beeapi/internal/state"
+	"github.com/BeeAPI-AI/beeapi/internal/updater"
 )
 
 type runner struct {
-	ctx         context.Context
-	version     string
-	language    string
-	in          io.Reader
-	reader      *bufio.Reader
-	out         io.Writer
-	errOut      io.Writer
-	store       *state.Store
-	logoShown   bool
-	optimize    func(string, bool, bool) (routeopt.Result, error)
-	openBrowser func(string) error
-	usageLookup usageLookupFunc
-	usageCache  usageCacheStore
+	ctx            context.Context
+	version        string
+	language       string
+	in             io.Reader
+	reader         *bufio.Reader
+	out            io.Writer
+	errOut         io.Writer
+	store          *state.Store
+	logoShown      bool
+	optimize       func(string, bool, bool) (routeopt.Result, error)
+	openBrowser    func(string) error
+	usageLookup    usageLookupFunc
+	usageCache     usageCacheStore
+	updateClient   *updater.Client
+	executablePath func() (string, error)
 }
 
 type credentialMaterial struct {
@@ -49,6 +52,11 @@ type credentialMaterial struct {
 	Models                    []string
 	ModelOptions              []beeapi.ModelOption
 	ModelOptionsAuthoritative bool
+}
+
+type authorizationResult struct {
+	Credentials []credentialMaterial
+	Stored      []state.Credential
 }
 
 type credentialModelDiscovery struct {
@@ -87,20 +95,23 @@ func Run(ctx context.Context, args []string, version string, in io.Reader, out, 
 		}
 	}
 	if len(args) == 0 {
+		r.notifyUpdateIfAvailable()
 		if !cfg.Initialized() {
-			return r.setup(nil)
+			return r.setupWithRecovery(nil)
 		}
 		return r.home()
 	}
 	switch args[0] {
 	case "setup", "init":
-		return r.setup(args[1:])
+		return r.setupWithRecovery(args[1:])
 	case "detect":
 		return r.detect()
 	case "status":
 		return r.status()
 	case "login", "connect":
-		return r.reconnect()
+		return r.reconnectWithRecovery()
+	case "logout", "disconnect":
+		return r.disconnectOAuthAccount()
 	case "configure", "config":
 		return r.configure(args[1:])
 	case "network":
@@ -109,6 +120,8 @@ func Run(ctx context.Context, args []string, version string, in io.Reader, out, 
 		return r.rollback(args[1:])
 	case "token":
 		return r.token(args[1:])
+	case "update", "upgrade":
+		return r.updateCLI(args[1:])
 	case "run":
 		return r.runAgent(args[1:])
 	case "language", "lang":
@@ -149,6 +162,7 @@ Usage:
   beeapi setup                   Run first-time setup again
   beeapi status                  Show the current connection and tool configuration
   beeapi login                   Authorize again or update API Key configurations
+  beeapi logout                  Revoke the OAuth account connection; keep saved API Keys
   beeapi detect                  Detect installed AI CLI tools
   beeapi configure               Reconfigure using saved credentials
   beeapi network status          Check the built-in API domains
@@ -156,6 +170,7 @@ Usage:
   beeapi network restore         Remove Hosts entries managed by beeapi
   beeapi rollback [latest|ID]    Restore a configuration backup
   beeapi language [zh-CN|en]     Change the interface language
+  beeapi update                  Check for and install a verified CLI update
   beeapi run <tool> [args...]    Compatibility/troubleshooting launcher
   beeapi token print [--agent tool] Print the saved API Key for the target tool only
 
@@ -169,6 +184,7 @@ Supported: Claude Code, Claude Desktop (Code), Codex, Gemini CLI, Grok Build, Op
   beeapi setup                   重新运行首次设置
   beeapi status                  查看当前连接与工具配置
   beeapi login                   重新授权或更新密钥配置
+  beeapi logout                  撤销 OAuth 账户连接；保留已保存 API Key
   beeapi detect                  检查本机已安装的 AI CLI
   beeapi configure               使用已保存凭据重新配置
   beeapi network status          检测内置 API 域名
@@ -176,6 +192,7 @@ Supported: Claude Code, Claude Desktop (Code), Codex, Gemini CLI, Grok Build, Op
   beeapi network restore         移除 beeapi 管理的 Hosts 记录
   beeapi rollback [latest|编号]  恢复配置备份
   beeapi language [zh-CN|en]     切换界面语言
+  beeapi update                  检查并安装经过校验的 CLI 更新
   beeapi run <工具> [参数...]    兼容/排障方式启动目标工具
   beeapi token print [--agent 工具] 仅向目标工具提供已保存的 API Key
 
@@ -199,28 +216,58 @@ func (r *runner) setup(args []string) error {
 	r.showLogo()
 	r.line(r.out, "\n首次设置 · 连接 BeeAPI 并配置现有 AI 工具", "\nFirst-time setup · Connect BeeAPI and configure your AI tools")
 	fmt.Fprintln(r.out, "────────────────────────────────────────")
+	apiKey := strings.TrimSpace(apiKeyFlag)
+	if apiKey == "" {
+		apiKey = strings.TrimSpace(os.Getenv("BEEAPI_API_KEY"))
+	}
+	pending, resumePending, err := r.pendingSetupForMode(pendingModeSetup, assumeYes)
+	if err != nil {
+		return err
+	}
+	if apiKey != "" {
+		resumePending = false
+	}
+	if resumePending && strings.TrimSpace(endpointFlag) == "" {
+		endpointFlag = pending.Endpoint
+	}
 	endpoint, err := r.resolveEndpoint(endpointFlag, assumeYes)
 	if err != nil {
 		return err
 	}
 
 	r.line(r.out, "\n[2/3] 连接 BeeAPI 并读取可用配置", "\n[2/3] Connect BeeAPI and load available configurations")
-	apiKey := strings.TrimSpace(apiKeyFlag)
-	if apiKey == "" {
-		apiKey = strings.TrimSpace(os.Getenv("BEEAPI_API_KEY"))
-	}
 	var credentials []credentialMaterial
-	if apiKey == "" {
-		credentials, err = r.authorize(endpoint, noOpen)
+	var storedCredentials []state.Credential
+	if resumePending {
+		credentials, err = r.restorePendingCredentialMaterials(pending)
 		if err != nil {
 			return err
 		}
+		storedCredentials = pending.Credentials
+		r.format(r.out, "  ✓ 已恢复上次授权保存的 %d 个 API Key。\n", "  ✓ Restored %d API Key(s) saved by the previous authorization.\n", len(credentials))
+		r.updatePendingSetup(pendingModeSetup, endpoint, storedCredentials, nil)
+	} else if apiKey == "" {
+		var authorized authorizationResult
+		authorized, err = r.authorize(endpoint, noOpen, pendingModeSetup)
+		if err != nil {
+			return err
+		}
+		credentials = authorized.Credentials
+		storedCredentials = authorized.Stored
 	} else {
 		r.line(r.out, "  使用命令行或环境变量提供的单个 API Key（兼容模式）。", "  Using one API Key supplied by a flag or environment variable (compatibility mode).")
 		credentials = []credentialMaterial{{ID: "manual", Name: r.text("手动 API Key", "Manual API Key"), Prefix: safeKeyPrefix(apiKey), Secret: apiKey}}
+		r.clearOAuthAccountForCompatibility()
+	}
+	if !resumePending && len(storedCredentials) == 0 {
+		storedCredentials, err = r.checkpointCredentialMaterials(pendingModeSetup, endpoint, credentials)
+		if err != nil {
+			return err
+		}
 	}
 	credentials, err = r.discoverCredentialModels(endpoint, credentials)
 	if err != nil {
+		r.updatePendingSetup(pendingModeSetup, endpoint, storedCredentials, err)
 		return err
 	}
 	r.format(r.out, "  ✓ 已连接 BeeAPI · 已读取 %d 个可用 API Key\n", "  ✓ Connected to BeeAPI · Loaded %d usable API Key(s)\n", len(credentials))
@@ -228,19 +275,23 @@ func (r *runner) setup(args []string) error {
 	r.line(r.out, "\n[3/3] 选择工具、密钥配置与模型", "\n[3/3] Choose tools, API Keys, and models")
 	environments, err := detectEnvironments()
 	if err != nil {
+		r.updatePendingSetup(pendingModeSetup, endpoint, storedCredentials, err)
 		return err
 	}
 	r.printEnvironments(environments)
 	agents, err := r.selectAgents(environments, agentsFlag, assumeYes)
 	if err != nil {
+		r.updatePendingSetup(pendingModeSetup, endpoint, storedCredentials, err)
 		return err
 	}
 	assignments, err := r.selectCredentialAssignments(agents, credentials, nil, assumeYes)
 	if err != nil {
+		r.updatePendingSetup(pendingModeSetup, endpoint, storedCredentials, err)
 		return err
 	}
 	selectedModels, err := r.selectModelsForAssignments(agents, credentials, assignments, assumeYes)
 	if err != nil {
+		r.updatePendingSetup(pendingModeSetup, endpoint, storedCredentials, err)
 		return err
 	}
 	defaultName := defaultProfileNameForLanguage(r.language)
@@ -264,6 +315,7 @@ func (r *runner) setup(args []string) error {
 	}
 	apiKeys, err := apiKeysForAssignments(agents, credentials, assignments)
 	if err != nil {
+		r.updatePendingSetup(pendingModeSetup, endpoint, storedCredentials, err)
 		return err
 	}
 	binaryPath, _ := os.Executable()
@@ -272,11 +324,7 @@ func (r *runner) setup(args []string) error {
 		Agents: agents, BinaryPath: binaryPath,
 	})
 	if err != nil {
-		return err
-	}
-	storedCredentials, err := r.saveCredentialMaterials(credentials)
-	if err != nil {
-		_, _ = r.store.Rollback(result.BackupID)
+		r.updatePendingSetup(pendingModeSetup, endpoint, storedCredentials, err)
 		return err
 	}
 	cfg := state.Config{
@@ -295,7 +343,11 @@ func (r *runner) setup(args []string) error {
 	cfg.ActiveProfile = "default"
 	if err := r.store.SaveConfig(cfg); err != nil {
 		_, _ = r.store.Rollback(result.BackupID)
+		r.updatePendingSetup(pendingModeSetup, endpoint, storedCredentials, err)
 		return err
+	}
+	if err := r.store.ClearPendingSetup(); err != nil {
+		r.format(r.errOut, "  警告：清理设置续接点失败：%v\n", "  Warning: could not clear the setup checkpoint: %v\n", err)
 	}
 
 	r.line(r.out, "\n配置完成", "\nSetup complete")
@@ -596,33 +648,60 @@ func parseAgents(raw string) ([]string, error) {
 	return agents, nil
 }
 
-func (r *runner) authorize(endpoint string, noOpen bool) ([]credentialMaterial, error) {
+func (r *runner) authorize(endpoint string, noOpen bool, mode string) (authorizationResult, error) {
+	if r.store != nil {
+		existing, loadErr := r.store.LoadOAuthAccount()
+		if loadErr != nil {
+			return authorizationResult{}, loadErr
+		}
+		if strings.TrimSpace(existing.TokenCredentialID) != "" && strings.TrimSpace(existing.TokenBackend) != "" {
+			return r.authorizeWithExistingOAuth(existing, endpoint, noOpen, mode)
+		}
+	}
 	r.line(r.out, "  1. 跳转网站授权登录（推荐；授权此设备读取账户可用 API Key）", "  1. Authorize in your browser (recommended; allows this device to read available account API Keys)")
 	r.line(r.out, "  2. 直接粘贴 API Key（兼容回退）", "  2. Paste one API Key (compatibility fallback)")
 	choice, err := r.askLocalized("  请选择 [1]: ", "  Select [1]: ")
 	if err != nil && !errors.Is(err, io.EOF) {
-		return nil, err
+		return authorizationResult{}, err
 	}
 	choice = strings.TrimSpace(choice)
 	if choice == "2" {
-		return r.pasteAPIKey(endpoint)
+		credentials, pasteErr := r.pasteAPIKey(endpoint)
+		if pasteErr == nil {
+			r.clearOAuthAccountForCompatibility()
+		}
+		return authorizationResult{Credentials: credentials}, pasteErr
 	}
 	if choice != "" && choice != "1" {
-		return nil, errors.New(r.text("登录方式只能选择 1 或 2", "Login method must be 1 or 2"))
+		return authorizationResult{}, errors.New(r.text("登录方式只能选择 1 或 2", "Login method must be 1 or 2"))
 	}
+	oauthClient, _, account, oauthErr := r.authorizeOAuthAccount(endpoint, noOpen)
+	if oauthErr == nil {
+		result, selectErr := r.selectAndExportOAuthCredentials(oauthClient, account, endpoint, mode)
+		if selectErr == nil || !oauthInteractiveAuthorizationRequired(selectErr) {
+			return result, selectErr
+		}
+		r.line(r.out, "  OAuth 会话需要重新确认，正在生成新的网页授权。", "  The OAuth session needs renewed approval; creating a new browser authorization.")
+		return r.authorizeAndSelectOAuthCredentials(endpoint, noOpen, mode)
+	}
+	if !oauthCapabilityUnavailable(oauthErr) {
+		return authorizationResult{}, oauthErr
+	}
+	r.line(r.out, "  此入口尚未提供新版 OAuth 账户连接，正在尝试兼容设备授权。", "  This endpoint does not yet provide the new OAuth account connection; trying compatible device authorization.")
 	client := beeapi.New(endpoint)
 	deviceCtx, cancel := context.WithTimeout(r.ctx, 8*time.Second)
 	code, err := client.StartDeviceAuth(deviceCtx)
 	cancel()
 	if err == nil && code.DeviceCode != "" && code.UserCode != "" {
 		if presentErr := r.presentDeviceAuthorization(endpoint, code, noOpen); presentErr != nil {
-			return nil, presentErr
+			return authorizationResult{}, presentErr
 		}
 		credentials, pollErr := r.pollDevice(client, code)
 		if pollErr == nil {
-			return credentials, nil
+			r.clearOAuthAccountForCompatibility()
+			return authorizationResult{Credentials: credentials}, nil
 		}
-		return nil, pollErr
+		return authorizationResult{}, pollErr
 	}
 	var apiErr *beeapi.APIError
 	if err != nil && (!errors.As(err, &apiErr) || (apiErr.Status != 404 && apiErr.Status != 405 && apiErr.Status != 501)) {
@@ -637,12 +716,16 @@ func (r *runner) authorize(endpoint string, noOpen bool) ([]credentialMaterial, 
 	r.line(r.out, "  CLI 不会要求或接收 BeeAPI 账户密码。", "  The CLI never asks for or receives your BeeAPI account password.")
 	fallback, askErr := r.askLocalized("  是否改用粘贴 API Key？[Y/n]: ", "  Paste an API Key instead? [Y/n]: ")
 	if askErr != nil && !errors.Is(askErr, io.EOF) {
-		return nil, askErr
+		return authorizationResult{}, askErr
 	}
 	if strings.EqualFold(strings.TrimSpace(fallback), "n") {
-		return nil, errors.New(r.text("网站授权未完成", "Browser authorization was not completed"))
+		return authorizationResult{}, errors.New(r.text("网站授权未完成", "Browser authorization was not completed"))
 	}
-	return r.pasteAPIKey(endpoint)
+	credentials, pasteErr := r.pasteAPIKey(endpoint)
+	if pasteErr == nil {
+		r.clearOAuthAccountForCompatibility()
+	}
+	return authorizationResult{Credentials: credentials}, pasteErr
 }
 
 func (r *runner) presentDeviceAuthorization(endpoint string, code beeapi.DeviceCode, noOpen bool) error {
@@ -925,6 +1008,16 @@ func (r *runner) discoverCredentialModels(endpoint string, credentials []credent
 			return nil, errors.New(r.text("BeeAPI 返回了重复的设备凭据", "BeeAPI returned duplicate device credentials"))
 		}
 		seen[credentials[index].ID] = true
+		if credentials[index].ModelOptionsAuthoritative && len(credentials[index].ModelOptions) > 0 {
+			credentials[index].ModelOptions = normalizeModelOptions(credentials[index].ModelOptions)
+			credentials[index].Models = credentials[index].Models[:0]
+			for _, option := range credentials[index].ModelOptions {
+				credentials[index].Models = append(credentials[index].Models, option.ID)
+			}
+			r.format(r.out, "    %s · 可用模型 %d 个 · 已验证协议能力\n", "    %s · %d available model(s) · Protocol capabilities verified\n", credentials[index].Name, len(credentials[index].Models))
+			usable = append(usable, credentials[index])
+			continue
+		}
 		discovery, err := r.modelsForCredential(endpoint, credentials[index].Secret)
 		if err != nil {
 			r.format(r.out, "    ↷ %s · 已跳过：%v\n", "    ↷ %s · Skipped: %v\n", credentials[index].Name, err)

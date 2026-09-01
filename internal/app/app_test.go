@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -32,10 +33,11 @@ func TestAuthorizeOffersExplicitAPIKeyFallbackWithoutPassword(t *testing.T) {
 		out:    &output,
 		errOut: &output,
 	}
-	credentials, err := r.authorize("https://beeapi.dev", true)
+	authorized, err := r.authorize("https://beeapi.dev", true, pendingModeSetup)
 	if err != nil {
 		t.Fatal(err)
 	}
+	credentials := authorized.Credentials
 	if len(credentials) != 1 || credentials[0].Secret != "sk-test-key" || credentials[0].Name != "手动 API Key" {
 		t.Fatalf("unexpected fallback result: %#v", credentials)
 	}
@@ -48,6 +50,15 @@ func TestAuthorizeOffersExplicitAPIKeyFallbackWithoutPassword(t *testing.T) {
 	}
 }
 
+func TestOAuthCompatibilityFallbackOnlyAcceptsUnavailableDiscovery(t *testing.T) {
+	if !oauthCapabilityUnavailable(beeapi.ErrOAuthDiscoveryUnavailable) {
+		t.Fatal("official SPA discovery fallback did not enable compatibility mode")
+	}
+	if oauthCapabilityUnavailable(errors.New("untrusted OAuth issuer")) {
+		t.Fatal("an OAuth trust failure incorrectly enabled compatibility mode")
+	}
+}
+
 func TestStableCredentialIDDeduplicatesRepeatedExistingKeyExports(t *testing.T) {
 	first := stableCredentialID("sk-existing-secret")
 	second := stableCredentialID("  sk-existing-secret\n")
@@ -56,6 +67,46 @@ func TestStableCredentialIDDeduplicatesRepeatedExistingKeyExports(t *testing.T) 
 	}
 	if first == stableCredentialID("sk-other-secret") {
 		t.Fatal("different API keys received the same local credential ID")
+	}
+}
+
+func TestCredentialCheckpointCanResumeWithoutAnotherAuthorization(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("GETBEE_DISABLE_KEYRING", "1")
+	store := &state.Store{Dir: home}
+	input := strings.NewReader("\n")
+	var output bytes.Buffer
+	r := &runner{
+		ctx: context.Background(), in: input, reader: bufio.NewReader(input),
+		out: &output, errOut: &output, store: store,
+	}
+
+	stored, err := r.checkpointCredentialMaterials(pendingModeSetup, "https://beeapi.dev", []credentialMaterial{{
+		ID: "key-one", Name: "Coding", Prefix: "sk-test", Secret: "sk-resumable-secret",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored) != 1 || stored[0].Backend != "protected-file" {
+		t.Fatalf("unexpected checkpoint credentials: %#v", stored)
+	}
+
+	pending, resume, err := r.pendingSetupForMode(pendingModeSetup, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resume || pending.Endpoint != "https://beeapi.dev" {
+		t.Fatalf("checkpoint was not resumed: resume=%v pending=%#v", resume, pending)
+	}
+	credentials, err := r.loadPendingCredentialMaterials(pending)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(credentials) != 1 || credentials[0].Secret != "sk-resumable-secret" {
+		t.Fatalf("resumed credential mismatch: %#v", credentials)
+	}
+	if raw, err := os.ReadFile(store.PendingSetupPath()); err != nil || bytes.Contains(raw, []byte("sk-resumable-secret")) {
+		t.Fatalf("pending checkpoint leaked API Key plaintext: %s, err=%v", raw, err)
 	}
 }
 
@@ -149,7 +200,7 @@ func TestUnavailableDeviceAuthorizationShowsLoginPageWithoutClaimingItCanApprove
 		out:    &output,
 		errOut: &output,
 	}
-	_, err := r.authorize("https://beeapi.dev", false)
+	_, err := r.authorize("https://beeapi.dev", false, pendingModeSetup)
 	if err == nil || !strings.Contains(err.Error(), "网站授权未完成") {
 		t.Fatalf("unexpected unavailable authorization result: %v", err)
 	}

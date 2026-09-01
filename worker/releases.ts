@@ -64,6 +64,14 @@ const cfstLatestFallback = JSON.stringify({
 export function resolveReleaseRoute(url: URL): ReleaseRoute | null {
   if (url.search || url.hash) return null;
 
+  if (url.pathname === "/releases/latest.json") {
+    return {
+      upstream: "https://api.github.com/repos/BeeAPI-AI/beeapi/releases/latest",
+      cacheSeconds: 300,
+      immutable: false,
+    };
+  }
+
   if (url.pathname === "/releases/cfst/latest.json") {
     return {
       upstream: "https://api.github.com/repos/XIU2/CloudflareSpeedTest/releases/latest",

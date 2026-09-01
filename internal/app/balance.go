@@ -130,6 +130,9 @@ func formatBalance(value float64, currency string) string {
 }
 
 func (r *runner) homeBalanceLabel(cfg state.Config) string {
+	if balance, err := r.queryOAuthAccountBalance(false); err == nil {
+		return formatBalance(balance.Current(), balance.CurrencyCode())
+	}
 	credentials, err := r.loadCredentialMaterials(cfg, false)
 	if err != nil || len(credentials) == 0 {
 		return r.text("暂不可用", "Unavailable")
@@ -150,6 +153,45 @@ func (r *runner) homeBalanceLabel(cfg state.Config) string {
 	return label
 }
 
+func (r *runner) queryOAuthAccountBalance(force bool) (beeapi.OAuthBalance, error) {
+	account, err := r.store.LoadOAuthAccount()
+	if err != nil {
+		return beeapi.OAuthBalance{}, err
+	}
+	if strings.TrimSpace(account.TokenCredentialID) == "" || strings.TrimSpace(account.Issuer) == "" {
+		return beeapi.OAuthBalance{}, errors.New("OAuth account is not connected")
+	}
+	cacheKey := "oauth-account\x00" + account.Issuer
+	now := time.Now()
+	if !force {
+		if entry, ok := r.usageCache.load(cacheKey, now); ok {
+			return beeapi.OAuthBalance{Available: entry.usage.Balance, Currency: entry.usage.Currency}, entry.err
+		}
+	}
+	baseCtx := r.ctx
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(baseCtx, 8*time.Second)
+	defer cancel()
+	client, _, err := r.oauthAccountClient(ctx)
+	if err == nil {
+		balanceCtx, balanceCancel := context.WithTimeout(ctx, 5*time.Second)
+		balance, balanceErr := client.OAuthAccountBalance(balanceCtx)
+		balanceCancel()
+		if balanceErr == nil {
+			r.usageCache.save(cacheKey, usageCacheEntry{
+				usage:     beeapi.Usage{Balance: balance.Current(), Currency: balance.CurrencyCode()},
+				expiresAt: now.Add(30 * time.Second),
+			})
+			return balance, nil
+		}
+		err = balanceErr
+	}
+	r.usageCache.save(cacheKey, usageCacheEntry{err: err, expiresAt: now.Add(5 * time.Second)})
+	return beeapi.OAuthBalance{}, err
+}
+
 type credentialUsageResult struct {
 	credential credentialMaterial
 	usage      beeapi.Usage
@@ -166,6 +208,10 @@ func (r *runner) balanceMenu() error {
 		return err
 	}
 	r.line(r.out, "\n密钥与余额", "\nAPI Keys and balance")
+	oauthBalance, oauthBalanceErr := r.queryOAuthAccountBalance(true)
+	if oauthBalanceErr == nil {
+		r.format(r.out, "  账户余额  %s · OAuth 账户\n", "  Account balance  %s · OAuth account\n", formatBalance(oauthBalance.Current(), oauthBalance.CurrencyCode()))
+	}
 	results := make([]credentialUsageResult, len(credentials))
 	var wait sync.WaitGroup
 	for index, credential := range credentials {
@@ -178,10 +224,12 @@ func (r *runner) balanceMenu() error {
 	}
 	wait.Wait()
 
-	for _, result := range results {
-		if result.err == nil {
-			r.format(r.out, "  账户余额  %s\n", "  Account balance  %s\n", formatBalance(result.usage.Balance, result.usage.Currency))
-			break
+	if oauthBalanceErr != nil {
+		for _, result := range results {
+			if result.err == nil {
+				r.format(r.out, "  账户余额  %s\n", "  Account balance  %s\n", formatBalance(result.usage.Balance, result.usage.Currency))
+				break
+			}
 		}
 	}
 	for index, result := range results {

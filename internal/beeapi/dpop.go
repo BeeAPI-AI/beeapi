@@ -8,15 +8,16 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math/big"
 	"strings"
 	"sync"
 	"time"
 )
 
-// dpopSigner is intentionally scoped to one running authorization flow. The
-// BeeAPI configuration token is short-lived and has no refresh token, so there
-// is no long-lived private key to leave behind in a plaintext config file.
+// dpopSigner is scoped to one client session. OAuth Account sessions export
+// the private key only into the same protected secret record as their refresh
+// token; it must never be written into ordinary CLI configuration metadata.
 type dpopSigner struct {
 	private *ecdsa.PrivateKey
 	mu      sync.Mutex
@@ -28,6 +29,55 @@ func newDPoPSigner() (*dpopSigner, error) {
 		return nil, err
 	}
 	return &dpopSigner{private: private}, nil
+}
+
+type privateDPoPJWK struct {
+	KTY string `json:"kty"`
+	CRV string `json:"crv"`
+	X   string `json:"x"`
+	Y   string `json:"y"`
+	D   string `json:"d"`
+}
+
+func (s *dpopSigner) exportPrivateJWK() (string, error) {
+	if s == nil || s.private == nil || s.private.D == nil {
+		return "", errors.New("DPoP signer is not initialized")
+	}
+	jwk := privateDPoPJWK{
+		KTY: "EC", CRV: "P-256",
+		X: base64.RawURLEncoding.EncodeToString(paddedP256Coordinate(s.private.PublicKey.X)),
+		Y: base64.RawURLEncoding.EncodeToString(paddedP256Coordinate(s.private.PublicKey.Y)),
+		D: base64.RawURLEncoding.EncodeToString(paddedP256Coordinate(s.private.D)),
+	}
+	b, err := json.Marshal(jwk)
+	return string(b), err
+}
+
+func dpopSignerFromPrivateJWK(raw string) (*dpopSigner, error) {
+	var jwk privateDPoPJWK
+	if err := json.Unmarshal([]byte(strings.TrimSpace(raw)), &jwk); err != nil {
+		return nil, fmt.Errorf("decode DPoP private JWK: %w", err)
+	}
+	if jwk.KTY != "EC" || jwk.CRV != "P-256" || jwk.D == "" {
+		return nil, errors.New("unsupported DPoP private JWK")
+	}
+	dBytes, err := base64.RawURLEncoding.DecodeString(jwk.D)
+	if err != nil || len(dBytes) == 0 || len(dBytes) > 32 {
+		return nil, errors.New("invalid DPoP private scalar")
+	}
+	curve := elliptic.P256()
+	d := new(big.Int).SetBytes(dBytes)
+	if d.Sign() <= 0 || d.Cmp(curve.Params().N) >= 0 {
+		return nil, errors.New("invalid DPoP private scalar")
+	}
+	x, y := curve.ScalarBaseMult(paddedP256Coordinate(d))
+	if jwk.X != "" && jwk.X != base64.RawURLEncoding.EncodeToString(paddedP256Coordinate(x)) {
+		return nil, errors.New("DPoP JWK public x does not match private key")
+	}
+	if jwk.Y != "" && jwk.Y != base64.RawURLEncoding.EncodeToString(paddedP256Coordinate(y)) {
+		return nil, errors.New("DPoP JWK public y does not match private key")
+	}
+	return &dpopSigner{private: &ecdsa.PrivateKey{PublicKey: ecdsa.PublicKey{Curve: curve, X: x, Y: y}, D: d}}, nil
 }
 
 func (s *dpopSigner) proof(method, targetURI, accessToken string, now time.Time) (string, error) {

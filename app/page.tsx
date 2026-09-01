@@ -13,8 +13,8 @@ const phases = [
     number: "02",
     key: "AUTH",
     title: "连接 BeeAPI",
-    description: "在 BeeAPI 官方页面登录并核对设备。批准后，CLI 一次读取账户当前可用的 API Key，再分别获取模型；也可直接粘贴单个 Key。",
-    note: "网页批准设备 → 读取可用 Key → 获取模型",
+    description: "在 BeeAPI 官方页面完成 OAuth 授权。CLI 先读取账户余额、Key 元数据与模型能力；你在终端选中 Key 后，才会一次性领取并安全保存。",
+    note: "OAuth → 查看 Key / 模型 → 选择后领取",
   },
   {
     number: "03",
@@ -45,7 +45,7 @@ const safeguards = [
   { title: "下载可验证", text: "发行文件来源固定；优先走 GetBeeAPI 边缘缓存，失败回退 GitHub，并始终核对 SHA-256。" },
   { title: "线路可验证", text: "候选 IP 仍使用 BeeAPI 域名完成 TLS 握手，证书不匹配立即拒绝。" },
   { title: "修改可恢复", text: "配置与 Hosts 写入前分别备份，受管区块不触碰用户的其他内容。" },
-  { title: "授权看得见", text: "网页会明确显示设备和授权范围；CLI 不接触密码、2FA 或网页会话，只在批准后一次读取现有可用 Key。" },
+  { title: "授权看得见", text: "网页明确列出账户、余额与 Key 读取范围；CLI 不接触密码、2FA 或 Cookie，只领取你随后在终端明确选中的 Key。" },
 ];
 
 const faqs = [
@@ -128,7 +128,7 @@ export default function Home() {
           </div>
         </div>
 
-        <p className="hero-hint">首次输入 <code>beeapi</code> 完成三步设置；以后输入即可切换命名方案、查看余额与 Key 状态。</p>
+        <p className="hero-hint">首次输入 <code>beeapi</code> 完成三步设置；以后输入即可切换方案、查看余额与 Key 状态，也可用 <code>beeapi update</code> 安全更新。</p>
 
         <div className="hero-toolrail" aria-label="GetBeeAPI 支持的工具">
           <p>一条命令，配置这些工具</p>
@@ -247,7 +247,7 @@ export default function Home() {
             <p className="section-kicker">AUTHORIZATION</p>
             <h2>用熟悉的方式，<br />连接 BeeAPI。</h2>
           </div>
-          <p>推荐在 BeeAPI 官方网页完成登录、核对并授权设备；批准后 CLI 一次读取账户当前可用的现有 Key，不会额外创建 Key。也可以直接粘贴单个 Key。两种方式都不会让 CLI 接触账号密码。</p>
+          <p>推荐通过 BeeAPI OAuth 连接账户：网页只负责登录并确认权限，CLI 先读取余额、Key 名称与模型能力；只有你在终端选中 Key 后，才会一次性领取。不会创建新 Key，也可以直接粘贴单个 Key 回退。</p>
         </div>
 
         <div className="auth-grid">
@@ -256,23 +256,25 @@ export default function Home() {
               <span className="choice-number">01</span>
               <span className="recommended-pill"><i />推荐</span>
             </div>
-            <h3>网页登录并批准设备</h3>
-            <p>在官方网页核对设备并批准。BeeAPI 会把账户当时可导出的可用 Key 一次性交给 CLI；Key 与工具的选择留在终端完成，不创建重复密钥。</p>
+            <h3>OAuth 连接 BeeAPI 账户</h3>
+            <p>桌面端使用浏览器 + PKCE 回到本机，SSH 使用设备码并始终显示完整网址。授权后先在终端查看 Key 与模型，选择哪一个，才领取哪一个。</p>
             <div className="browser-preview" aria-label="BeeAPI 网页授权界面示意">
               <div className="browser-preview-bar">
-                <span><i />beeapi.ai/cli/authorize</span>
+                <span><i />beeapi.dev/oauth/authorize</span>
                 <b>官方域名</b>
               </div>
               <div className="approval-preview">
                 <span className="preview-icon">B</span>
-                <p><strong>GetBeeAPI 请求登录</strong><small>设备代码 · HM7K-WQ2P</small></p>
-                <span className="mock-button">批准此设备</span>
+                <p><strong>GetBeeAPI 请求连接账户</strong><small>账户资料 · 余额 · Key 与模型</small></p>
+                <span className="mock-button">同意并继续</span>
               </div>
             </div>
             <ul className="quiet-list">
               <li>密码、2FA 与网页 Cookie 不进入 CLI</li>
-              <li>SSH 终端会显示完整授权网址与设备码，可在其他设备打开</li>
-              <li>授权页会显示本次可读取的 Key 数量与范围</li>
+              <li>SSH 终端始终显示完整授权网址与设备码，可在其他设备打开</li>
+              <li>账户 Token 采用 DPoP 绑定，不能用于模型调用</li>
+              <li>API Key 先选择、再一次性领取、保存成功后立即确认清除</li>
+              <li>令牌交换与 Key 导出响应中断时复用原请求恢复；保存后可从本地断点继续</li>
             </ul>
           </article>
 
@@ -297,7 +299,7 @@ export default function Home() {
 
         <div className="service-note">
           <span>BeeAPI 服务端契约</span>
-          <p>设备授权使用进程内临时 DPoP 密钥绑定；短期配置令牌只能一次领取批准时账户中可导出的现有 Key，不能访问 /me、模型转发或其他账户管理接口。</p>
+          <p>OAuth public client 使用 PKCE、标准 Device Grant、轮换 Refresh Token 与持久 DPoP 设备绑定。账户 Token 只允许读取已授权的账户资源，不能进入模型转发；API Key 选择性导出采用短期、幂等、保存后 ACK 的一次性交付。</p>
           <a href="https://github.com/BeeAPI-AI/beeapi/blob/main/docs/device-authorization.md">查看设计文档 <span>↗</span></a>
         </div>
       </section>

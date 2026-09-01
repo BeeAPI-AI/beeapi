@@ -8,7 +8,7 @@
 beeapi
   ├─ 未初始化 → 显示 Logo → 首次选择并保存界面语言 → 三步首次设置
   │    ├─ 1. 选择可用入口，必要时优选 IP
-  │    ├─ 2. 网站授权设备/粘贴单 Key，读取既有 Key 与模型能力
+  │    ├─ 2. OAuth 连接账户/粘贴单 Key，选择既有 Key 与模型能力
   │    └─ 3. 识别工具、分配密钥与模型、备份并写入
   └─ 已初始化 → 显示 Logo、当前方案/余额/工具摘要与功能主页
        ├─ 快速切换、新建或编辑命名配置方案
@@ -21,6 +21,7 @@ beeapi
             ├─ 检测或优化网络入口
             ├─ 检查本机工具
             ├─ 恢复配置备份
+            ├─ 检查并安装 CLI 更新
             └─ 用户明确选择时重新运行首次设置
 ```
 
@@ -49,9 +50,11 @@ CLI 内置 `beeapi.ai` 与 `beeapi.dev` 作为引导入口。它先并发请求�
 
 ## 登录与凭据
 
-默认采用 [设备授权](device-authorization.md)。CLI 只持有 `device_code` 并轮询，不接触用户名、密码、OAuth 凭据、2FA 验证码或网页 Cookie。设备授权请求与短期登录令牌使用同一枚进程内临时 P-256 DPoP 密钥绑定。用户在官方页面核对并授权设备后，CLI 用短期令牌一次领取账户当时可导出的现有 API Key，不创建新的 Key；随后逐个读取模型能力，并在终端为工具分配 Key 与模型。
+默认采用 [OAuth 账户连接](device-authorization.md)，canonical issuer 固定为 `https://beeapi.dev`。桌面环境使用 Authorization Code + PKCE（S256）和随机 `127.0.0.1` loopback 回调；SSH 或无桌面环境使用标准 Device Authorization Grant，并始终在终端显示完整验证网址与用户码。两种方式签发同一种短期 DPoP Account Token 与轮换 Refresh Token。CLI 不接触用户名、密码、2FA 验证码或网页 Cookie。
 
-如果服务端尚未实现设备授权，或用户主动选择兼容模式，CLI 接受粘贴的 API Key。输入尽量关闭终端回显。
+账户 Token 只允许读取获准的账户资料、当前余额、API Key 元数据和每枚 Key 的模型能力，不能访问 `/v1` / `/v1beta` 模型代理。CLI 保留 BeeAPI 返回的 Key 与模型排序，让用户先在终端选择 Key；只有选中的 Key 才通过高敏 `api_keys:export` scope 进入短期、幂等的一次性导出。授权码交换、Refresh 轮换与 Key 导出在响应丢失时分别复用原 code、Refresh Token 或 Idempotency-Key 恢复同一结果。CLI 收到明文后先写入系统凭据存储和可续接 checkpoint，再 ACK 服务端，最后才进入工具配置；恢复 checkpoint 时也会先验证所有本地 Key 可读，再处理 ACK。账户 Token 或 Key 已保存后，后续步骤中断可直接继续，不要求重复网页授权。刷新后的长期会话不保留导出权限，后续领取新 Key 必须重新交互授权。
+
+如果服务端尚未发布 OAuth Account v1，CLI 可临时尝试旧设备授权；用户也可以主动选择粘贴单个 API Key。输入尽量关闭终端回显。任何模式都不在普通配置 JSON 中保存 Token、Refresh Token、DPoP 私钥或 API Key 明文。
 
 凭据保存顺序：
 
@@ -59,7 +62,7 @@ CLI 内置 `beeapi.ai` 与 `beeapi.dev` 作为引导入口。它先并发请求�
 - macOS：Keychain，否则权限 `0600` 文件。
 - Windows：当前用户 DPAPI，否则受保护文件。
 
-余额与 Key 状态通过 API Key 鉴权的 `GET /v1/usage` 读取。该接口只查询钱包和 Key 元数据，不经过模型路由且不计费。首页只读取当前使用的一个 Key 并缓存 30 秒；“密钥与余额”页面并发检查全部本地 Key，展示账户余额、Key 可用性、路由分组和到期日，不输出 Key 明文。
+OAuth 会话优先从账户资源读取当前余额；旧连接回退 API Key 鉴权的 `GET /v1/usage`。这些接口只查询钱包和 Key 元数据，不经过模型路由且不计费。首页缓存 30 秒；“密钥与余额”页面同时展示账户余额与全部本地 Key 的可用状态，不输出 Key 明文。
 
 ## 命名配置方案与切换
 
@@ -82,7 +85,7 @@ CLI 内置 `beeapi.ai` 与 `beeapi.dev` 作为引导入口。它先并发请求�
 | OpenClaw | `openclaw` 或本地配置 | 深度合并 BeeAPI provider 与默认模型 |
 | Hermes | `hermes` 或 `~/.hermes/config.yaml` | 只更新默认 `config.yaml` 的 `model` 连接字段及 `~/.hermes/.env` 的 OpenAI-compatible 凭据，保留 agent、MCP 等段落 |
 
-每个工具可以选择不同的账户现有 API Key 及该 Key 可用的模型。CLI 先按服务端返回的协议与客户端适配性筛选，再把服务端 `priority` 最高项标为默认：API Key 路由优先级是第一层，同一路由内沿用 BeeAPI 商家市场的模型排列。交互模式始终先列出 API Key（不兼容项保留展示但不可选），再列出所选 Key 的兼容模型，由用户分别确认；首次设置的 `--yes` 或命令行重配置等非交互路径才自动采用默认项。旧服务端缺少专用能力接口时才回退到基础模型列表。Claude Code 与 Claude Desktop Code 因共享同一设置文件，必须共用 Key 与模型。所有目标配置文件在第一次写入前归入同一个完整备份清单；任一写入失败就回滚整个批次。
+每个工具可以选择不同的账户现有 API Key 及该 Key 可用的模型。CLI 按服务端返回顺序保留 BeeAPI 的完整路由/商家市场排序，只根据 `protocols` 与 `recommended_for` 过滤目标工具不兼容项，不再用模型名称或本地规则重新排序。交互模式始终先列出 API Key（不兼容项保留展示但不可选），再列出所选 Key 的兼容模型，由用户分别确认；首次设置的 `--yes` 或命令行重配置等非交互路径才自动采用第一项。旧服务端缺少专用能力接口时才回退到基础模型列表。Claude Code 与 Claude Desktop Code 因共享同一设置文件，必须共用 Key 与模型。所有目标配置文件在第一次写入前归入同一个完整备份清单；任一写入失败就回滚整个批次。
 
 配置写入采用与 CC Switch 相同的“投影区”思路：只接管 BeeAPI 连接所需字段。JSON 只深度合并目标键；TOML 只更新顶层模型选择和 BeeAPI 专属表；`.env` 只替换指定变量；Hermes YAML 只更新 `model` 的三个连接字段。注释与无关段落尽量原样保留，写入保持幂等。Codex 的 `auth.json` 不参与修改，API Key 由原生 provider auth command 从本地凭据槽按需读取。工具因此可以直接以 `codex`、`gemini`、`grok` 或 `hermes` 启动，不再依赖 Shell 注入；旧版 Shell 管理区块会先备份再移除。
 
@@ -91,5 +94,7 @@ Claude Desktop 的适配范围是其中的 Code 模式：Anthropic 官方说明 
 ## 发布与安装
 
 标签 `v*` 触发发行流程，为 Linux、macOS、Windows 的 `amd64` 与 `arm64` 构建静态二进制，生成每个归档的 SHA-256 文件并发布到 GitHub Releases。安装器优先从 `getbeeapi.com/releases/...` 的固定白名单 Worker 路由获取边缘缓存，失败时回退 GitHub；无论来源都在解压前校验同一 SHA-256。该 Worker 只允许已知平台发行文件与 CFST 文件名，不接受任意上游 URL。
+
+正式版 CLI 无参数启动时至多每 24 小时读取一次只读 Release 元数据，只提示、不自动安装；失败不会阻塞日常使用。`beeapi update` 才会下载当前 OS/架构的固定文件名发行包与 `.sha256`，限制响应和解包大小，只接受归档根目录中精确的 `beeapi` / `beeapi.exe`，校验通过后在同一文件系统原子替换。Windows 因运行中的 `.exe` 不能覆盖，校验完成后由独立 PowerShell 子进程等待 CLI 退出再替换。
 
 Unix 安装器按 zsh、bash、POSIX sh 或 fish 幂等写入 PATH；Windows 安装器更新用户 PATH。安装脚本无法修改父 shell 的当前进程环境，因此首次安装后应打开新终端，或按安装器提示加载对应启动文件。

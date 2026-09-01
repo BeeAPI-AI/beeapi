@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func TestProtectedCredentialFileForcesPrivatePermissions(t *testing.T) {
@@ -30,6 +31,70 @@ func TestProtectedCredentialFileForcesPrivatePermissions(t *testing.T) {
 	}
 	if got := info.Mode().Perm(); got != 0o600 {
 		t.Fatalf("credential mode = %o, want 600", got)
+	}
+}
+
+func TestPendingSetupPersistsOnlyCredentialReferences(t *testing.T) {
+	store := &Store{Dir: t.TempDir()}
+	retryUntil := time.Now().UTC().Add(3 * time.Minute).Round(0)
+	pending := PendingSetup{
+		Mode:     "setup",
+		Endpoint: "https://beeapi.dev",
+		Credentials: []Credential{{
+			ID: "credential-one", Name: "Coding", Prefix: "sk-test", Backend: "protected-file",
+		}},
+		OAuthExportID:         "export-one",
+		OAuthExportRetryUntil: retryUntil,
+		LastError:             "model discovery interrupted",
+	}
+	if err := store.SavePendingSetup(pending); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := store.LoadPendingSetup()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.SchemaVersion != CurrentPendingSetupVersion || loaded.Mode != "setup" || loaded.Endpoint != pending.Endpoint {
+		t.Fatalf("unexpected pending setup: %#v", loaded)
+	}
+	if loaded.OAuthExportID != "export-one" || !loaded.OAuthExportRetryUntil.Equal(retryUntil) {
+		t.Fatalf("export recovery metadata was not persisted: %#v", loaded)
+	}
+	if loaded.CreatedAt.IsZero() || loaded.UpdatedAt.IsZero() || loaded.UpdatedAt.Before(loaded.CreatedAt) {
+		t.Fatalf("missing pending lifecycle metadata: %#v", loaded)
+	}
+	raw, err := os.ReadFile(store.PendingSetupPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(raw, []byte("sk-secret")) || !bytes.Contains(raw, []byte("credential-one")) {
+		t.Fatalf("pending setup contains a secret or lost its reference: %s", raw)
+	}
+	info, err := os.Stat(store.PendingSetupPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("pending setup mode = %o, want 600", info.Mode().Perm())
+	}
+	if err := store.ClearPendingSetup(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(store.PendingSetupPath()); !os.IsNotExist(err) {
+		t.Fatalf("pending setup still exists after clear: %v", err)
+	}
+}
+
+func TestPendingSetupRejectsIncompleteCredentialReferences(t *testing.T) {
+	store := &Store{Dir: t.TempDir()}
+	for _, pending := range []PendingSetup{
+		{},
+		{Mode: "setup", Endpoint: "https://beeapi.dev"},
+		{Mode: "setup", Endpoint: "https://beeapi.dev", Credentials: []Credential{{ID: "missing-backend"}}},
+	} {
+		if err := store.SavePendingSetup(pending); err == nil {
+			t.Fatalf("invalid pending setup was accepted: %#v", pending)
+		}
 	}
 }
 
@@ -163,5 +228,20 @@ func TestSaveConfigPersistsNamedProfilesWithoutSecrets(t *testing.T) {
 	}
 	if len(raw) == 0 || bytes.Contains(raw, []byte("sk-secret")) {
 		t.Fatalf("config unexpectedly contains a secret: %s", raw)
+	}
+}
+
+func TestDeleteNamedCredentialRemovesProtectedFallback(t *testing.T) {
+	t.Setenv("GETBEE_DISABLE_KEYRING", "1")
+	store := &Store{Dir: t.TempDir()}
+	backend, err := store.SaveNamedCredential("oauth-account-v1", "refresh-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteNamedCredential(backend, "oauth-account-v1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.LoadNamedCredential(backend, "oauth-account-v1"); err == nil {
+		t.Fatal("deleted credential could still be loaded")
 	}
 }

@@ -70,6 +70,10 @@ func (c *Client) request(ctx context.Context, method, path string, body, out any
 }
 
 func (c *Client) requestWithProof(ctx context.Context, method, path string, body, out any, mode proofMode) error {
+	return c.requestWithProofHeaders(ctx, method, path, body, out, mode, nil)
+}
+
+func (c *Client) requestWithProofHeaders(ctx context.Context, method, path string, body, out any, mode proofMode, headers http.Header) error {
 	var payload io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -85,6 +89,11 @@ func (c *Client) requestWithProof(ctx context.Context, method, path string, body
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "beeapi-cli/1")
+	for name, values := range headers {
+		for _, value := range values {
+			req.Header.Add(name, value)
+		}
+	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -177,6 +186,30 @@ func (c *Client) ensureDPoP() (*dpopSigner, error) {
 	}
 	c.dpop = signer
 	return signer, nil
+}
+
+// ExportDPoPPrivateJWK serializes the sender-constraining key so an OAuth
+// refresh token can remain bound to the same client installation. Callers
+// must store the returned value as a secret, never in normal configuration.
+func (c *Client) ExportDPoPPrivateJWK() (string, error) {
+	signer, err := c.ensureDPoP()
+	if err != nil {
+		return "", err
+	}
+	return signer.exportPrivateJWK()
+}
+
+// ImportDPoPPrivateJWK restores a previously protected sender-constraining
+// key before refreshing or using an OAuth Account Token.
+func (c *Client) ImportDPoPPrivateJWK(raw string) error {
+	signer, err := dpopSignerFromPrivateJWK(raw)
+	if err != nil {
+		return err
+	}
+	c.dpopMu.Lock()
+	c.dpop = signer
+	c.dpopMu.Unlock()
+	return nil
 }
 
 type Endpoint struct {

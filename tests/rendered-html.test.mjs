@@ -16,15 +16,18 @@ test("exports the GetBeeAPI product page for static hosting", async () => {
   assert.match(html, /BeeAPI 访问入口/);
   assert.match(html, /https:\/\/beeapi\.ai/);
   assert.match(html, /https:\/\/beeapi\.dev/);
-  assert.match(html, /网页登录并批准设备/);
+  assert.match(html, /OAuth 连接 BeeAPI 账户/);
+  assert.match(html, /同意并继续/);
   assert.match(html, /直接粘贴 API Key/);
-  assert.match(html, /账户当前可用的现有 Key/);
-  assert.match(html, /批准此设备/);
-  assert.match(html, /不创建重复密钥/);
-  assert.match(html, /切换命名方案/);
+  assert.match(html, /授权后先在终端查看 Key 与模型/);
+  assert.match(html, /不会创建新 Key/);
+  assert.match(html, /SSH 终端始终显示完整授权网址与设备码/);
+  assert.match(html, /账户 Token 采用 DPoP 绑定/);
+  assert.match(html, /令牌交换与 Key 导出响应中断时复用原请求恢复/);
+  assert.match(html, /选择性导出采用短期、幂等、保存后 ACK 的一次性交付/);
+  assert.match(html, /能保存并切换多套配置/);
   assert.match(html, /账户余额与每个 Key 的可用状态/);
   assert.doesNotMatch(html, /设备专用 Key/);
-  assert.doesNotMatch(html, /选择 1–10 个/);
   for (const tool of [
     "Claude Code",
     "Claude Desktop",

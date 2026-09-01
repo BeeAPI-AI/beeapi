@@ -20,6 +20,8 @@ const keyringService = "com.getbeeapi.cli"
 
 const CurrentSchemaVersion = 4
 
+const CurrentPendingSetupVersion = 1
+
 type Credential struct {
 	ID           string `json:"id"`
 	Name         string `json:"name"`
@@ -64,6 +66,22 @@ type Config struct {
 	UpdatedAt         time.Time         `json:"updated_at"`
 }
 
+// PendingSetup is a resumable checkpoint written immediately after BeeAPI
+// credentials have been delivered and stored securely. It deliberately holds
+// only credential references; API Key plaintext remains in the OS keyring (or
+// the protected credential files used as a fallback).
+type PendingSetup struct {
+	SchemaVersion         int          `json:"schema_version"`
+	Mode                  string       `json:"mode"`
+	Endpoint              string       `json:"endpoint"`
+	Credentials           []Credential `json:"credentials"`
+	OAuthExportID         string       `json:"oauth_export_id,omitempty"`
+	OAuthExportRetryUntil time.Time    `json:"oauth_export_retry_until,omitempty"`
+	CreatedAt             time.Time    `json:"created_at"`
+	UpdatedAt             time.Time    `json:"updated_at"`
+	LastError             string       `json:"last_error,omitempty"`
+}
+
 // Initialized deliberately accepts pre-schema config files produced by
 // GetBeeAPI v0.1.0. Endpoint + credential backend were only written after the
 // old setup completed, so they are a safe migration signal for returning users.
@@ -100,6 +118,8 @@ func Open() (*Store, error) {
 
 func (s *Store) ConfigPath() string { return filepath.Join(s.Dir, "config.json") }
 
+func (s *Store) PendingSetupPath() string { return filepath.Join(s.Dir, "pending-setup.json") }
+
 func (s *Store) LoadConfig() (Config, error) {
 	var cfg Config
 	b, err := os.ReadFile(s.ConfigPath())
@@ -132,6 +152,61 @@ func (s *Store) SaveConfig(cfg Config) error {
 		return err
 	}
 	return os.Chmod(s.ConfigPath(), 0o600)
+}
+
+func (s *Store) LoadPendingSetup() (PendingSetup, error) {
+	var pending PendingSetup
+	b, err := os.ReadFile(s.PendingSetupPath())
+	if errors.Is(err, os.ErrNotExist) {
+		return pending, nil
+	}
+	if err != nil {
+		return pending, fmt.Errorf("读取未完成设置: %w", err)
+	}
+	if err := json.Unmarshal(b, &pending); err != nil {
+		return pending, fmt.Errorf("解析未完成设置: %w", err)
+	}
+	return pending, nil
+}
+
+func (s *Store) SavePendingSetup(pending PendingSetup) error {
+	if strings.TrimSpace(pending.Mode) == "" {
+		return errors.New("未完成设置缺少模式")
+	}
+	if strings.TrimSpace(pending.Endpoint) == "" {
+		return errors.New("未完成设置缺少 BeeAPI 入口")
+	}
+	if len(pending.Credentials) == 0 {
+		return errors.New("未完成设置缺少凭据")
+	}
+	for _, credential := range pending.Credentials {
+		if strings.TrimSpace(credential.ID) == "" || strings.TrimSpace(credential.Backend) == "" {
+			return errors.New("未完成设置包含无效凭据引用")
+		}
+	}
+	pending.SchemaVersion = CurrentPendingSetupVersion
+	now := time.Now().UTC()
+	if pending.CreatedAt.IsZero() {
+		pending.CreatedAt = now
+	}
+	pending.UpdatedAt = now
+	b, err := json.MarshalIndent(pending, "", "  ")
+	if err != nil {
+		return err
+	}
+	b = append(b, '\n')
+	if err := AtomicWrite(s.PendingSetupPath(), b, 0o600); err != nil {
+		return err
+	}
+	return os.Chmod(s.PendingSetupPath(), 0o600)
+}
+
+func (s *Store) ClearPendingSetup() error {
+	err := os.Remove(s.PendingSetupPath())
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
 }
 
 func (s *Store) SaveCredential(secret string) (string, error) {
@@ -232,6 +307,38 @@ func (s *Store) LoadNamedCredential(backend, id string) (string, error) {
 		return "", errors.New("本地 API Key 为空，请重新登录")
 	}
 	return secret, nil
+}
+
+// DeleteNamedCredential removes one secret from its recorded backend and from
+// all local fallback locations. It is used when an OAuth account connection is
+// explicitly replaced; API Key credentials are otherwise retained because a
+// saved profile may still reference them.
+func (s *Store) DeleteNamedCredential(backend, id string) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return errors.New("凭据 ID 不能为空")
+	}
+	account := credentialAccount(id)
+	switch backend {
+	case "secret-service":
+		if path, err := exec.LookPath("secret-tool"); err == nil {
+			_ = exec.Command(path, "clear", "service", keyringService, "account", account).Run()
+		}
+	case "keychain":
+		if path, err := exec.LookPath("security"); err == nil {
+			_ = exec.Command(path, "delete-generic-password", "-a", account, "-s", keyringService).Run()
+		}
+	}
+	paths := []string{
+		s.credentialPath(id),
+		strings.TrimSuffix(s.credentialPath(id), ".key") + ".dpapi",
+	}
+	for _, path := range paths {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
 }
 
 func credentialAccount(id string) string {

@@ -63,6 +63,35 @@ func TestDPoPProofIsES256RequestAndTokenBound(t *testing.T) {
 	}
 }
 
+func TestDPoPPrivateJWKRoundTripKeepsSenderBinding(t *testing.T) {
+	client := New("https://beeapi.test")
+	raw, err := client.ExportDPoPPrivateJWK()
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored := New("https://beeapi.test")
+	if err := restored.ImportDPoPPrivateJWK(raw); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := client.dpop.proof("GET", "https://beeapi.test/api/v1/oauth/account", "boa_test", time.Unix(1_700_000_000, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := restored.dpop.proof("GET", "https://beeapi.test/api/v1/oauth/account", "boa_test", time.Unix(1_700_000_001, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var firstHeader, secondHeader struct {
+		JWK map[string]string `json:"jwk"`
+	}
+	decodeJWTJSON(t, strings.Split(first, ".")[0], &firstHeader)
+	decodeJWTJSON(t, strings.Split(second, ".")[0], &secondHeader)
+	if firstHeader.JWK["x"] != secondHeader.JWK["x"] || firstHeader.JWK["y"] != secondHeader.JWK["y"] {
+		t.Fatalf("restored DPoP key changed sender binding: %#v != %#v", firstHeader.JWK, secondHeader.JWK)
+	}
+}
+
 func decodeJWTJSON(t *testing.T, part string, target any) {
 	t.Helper()
 	data, err := base64.RawURLEncoding.DecodeString(part)

@@ -110,14 +110,18 @@ func (r *runner) moreMenu() error {
   2. 检查本机工具环境
   3. 恢复配置备份
   4. 界面语言
-  5. 重新运行首次设置
+  5. 检查并安装 CLI 更新
+  6. 断开 OAuth 账户（保留本机 Key）
+  7. 重新运行首次设置
   0. 返回`, `
 More settings
   1. Network endpoints and Cloudflare IP selection
   2. Check local tool environment
   3. Restore a configuration backup
   4. Interface language
-  5. Run first-time setup again
+  5. Check and install a CLI update
+  6. Disconnect OAuth account (keep local Keys)
+  7. Run first-time setup again
   0. Back`)
 	choice, err := r.askLocalized("请选择: ", "Select an option: ")
 	if err != nil && !errors.Is(err, io.EOF) {
@@ -135,12 +139,23 @@ More settings
 	case "4":
 		return r.languageMenu()
 	case "5":
+		return r.updateCLI(nil)
+	case "6":
+		answer, confirmErr := r.askLocalized("  撤销账户连接但保留已保存 Key 与工具配置，继续？[y/N]: ", "  Revoke the account connection but keep saved Keys and tool configuration. Continue? [y/N]: ")
+		if confirmErr != nil && !errors.Is(confirmErr, io.EOF) {
+			return confirmErr
+		}
+		if yes(answer) {
+			return r.disconnectOAuthAccount()
+		}
+		return nil
+	case "7":
 		answer, confirmErr := r.askLocalized("  将重新选择网络入口、凭据和工具，继续？[y/N]: ", "  This will reselect the endpoint, credentials, and tools. Continue? [y/N]: ")
 		if confirmErr != nil && !errors.Is(confirmErr, io.EOF) {
 			return confirmErr
 		}
 		if yes(answer) {
-			return r.setup(nil)
+			return r.setupWithRecovery(nil)
 		}
 		return nil
 	default:
@@ -335,7 +350,14 @@ func (r *runner) reconnect() error {
 		return err
 	}
 	ensureProfileState(&cfg)
+	pending, resumePending, err := r.pendingSetupForMode(pendingModeReconnect, false)
+	if err != nil {
+		return err
+	}
 	endpoint := cfg.Endpoint
+	if resumePending {
+		endpoint = pending.Endpoint
+	}
 	if endpoint != "" {
 		probe := beeapi.ProbeEndpoints(r.ctx, []beeapi.Endpoint{{Name: "当前入口", BaseURL: endpoint}})
 		if len(probe) == 1 && probe[0].Reachable {
@@ -359,12 +381,34 @@ func (r *runner) reconnect() error {
 	}
 
 	r.line(r.out, "\n重新连接 BeeAPI · 获取新的密钥配置", "\nReconnect BeeAPI · Load updated API Key configurations")
-	credentials, err := r.authorize(endpoint, false)
-	if err != nil {
-		return err
+	var credentials []credentialMaterial
+	var storedCredentials []state.Credential
+	if resumePending {
+		credentials, err = r.restorePendingCredentialMaterials(pending)
+		if err != nil {
+			return err
+		}
+		storedCredentials = pending.Credentials
+		r.format(r.out, "  ✓ 已恢复上次授权保存的 %d 个 API Key。\n", "  ✓ Restored %d API Key(s) saved by the previous authorization.\n", len(credentials))
+		r.updatePendingSetup(pendingModeReconnect, endpoint, storedCredentials, nil)
+	} else {
+		var authorized authorizationResult
+		authorized, err = r.authorize(endpoint, false, pendingModeReconnect)
+		if err != nil {
+			return err
+		}
+		credentials = authorized.Credentials
+		storedCredentials = authorized.Stored
+		if len(storedCredentials) == 0 {
+			storedCredentials, err = r.checkpointCredentialMaterials(pendingModeReconnect, endpoint, credentials)
+			if err != nil {
+				return err
+			}
+		}
 	}
 	credentials, err = r.discoverCredentialModels(endpoint, credentials)
 	if err != nil {
+		r.updatePendingSetup(pendingModeReconnect, endpoint, storedCredentials, err)
 		return err
 	}
 	if cfg.BinaryPath == "" {
@@ -377,14 +421,17 @@ func (r *runner) reconnect() error {
 		var selectErr error
 		assignments, selectErr = r.selectCredentialAssignments(cfg.Agents, credentials, cfg.AgentCredentials, false)
 		if selectErr != nil {
+			r.updatePendingSetup(pendingModeReconnect, endpoint, storedCredentials, selectErr)
 			return selectErr
 		}
 		selectedModels, selectErr = r.selectModelsForAssignmentsWithDefaults(cfg.Agents, credentials, assignments, cfg.Models, false)
 		if selectErr != nil {
+			r.updatePendingSetup(pendingModeReconnect, endpoint, storedCredentials, selectErr)
 			return selectErr
 		}
 		apiKeys, keyErr := apiKeysForAssignments(cfg.Agents, credentials, assignments)
 		if keyErr != nil {
+			r.updatePendingSetup(pendingModeReconnect, endpoint, storedCredentials, keyErr)
 			return keyErr
 		}
 		result, applyErr := configurator.Apply(r.store, configurator.Options{
@@ -392,17 +439,11 @@ func (r *runner) reconnect() error {
 			Agents: cfg.Agents, BinaryPath: cfg.BinaryPath,
 		})
 		if applyErr != nil {
+			r.updatePendingSetup(pendingModeReconnect, endpoint, storedCredentials, applyErr)
 			return applyErr
 		}
 		appliedBackup = result.BackupID
 		r.format(r.out, "  已同步更新现有工具；备份 %s\n", "  Existing tools updated; backup %s\n", result.BackupID)
-	}
-	storedCredentials, err := r.saveCredentialMaterials(credentials)
-	if err != nil {
-		if appliedBackup != "" {
-			_, _ = r.store.Rollback(appliedBackup)
-		}
-		return err
 	}
 	cfg.Endpoint = endpoint
 	cfg.KeyName = credentialSummaryName(storedCredentials, r.language)
@@ -426,7 +467,11 @@ func (r *runner) reconnect() error {
 		if appliedBackup != "" {
 			_, _ = r.store.Rollback(appliedBackup)
 		}
+		r.updatePendingSetup(pendingModeReconnect, endpoint, storedCredentials, err)
 		return err
+	}
+	if err := r.store.ClearPendingSetup(); err != nil {
+		r.format(r.errOut, "  警告：清理设置续接点失败：%v\n", "  Warning: could not clear the setup checkpoint: %v\n", err)
 	}
 	r.clearUsageCache()
 	r.format(r.out, "\n已连接 BeeAPI · %s · %d 个密钥配置\n", "\nConnected to BeeAPI · %s · %d API Key configuration(s)\n", endpoint, len(credentials))

@@ -1,185 +1,254 @@
-# BeeAPI CLI 设备授权契约
+# BeeAPI OAuth 账户连接契约
+
+GetBeeAPI 默认使用 **BeeAPI OAuth Account Connection v1**。它负责连接账户、读取余额与 API Key 元数据，并在用户明确选择后一次性交付现有 API Key；它不创建新 Key，也不把账户 Token 当作模型调用凭据。
 
 ## 凭据边界
 
-GetBeeAPI 使用 RFC 8628 风格的设备授权，但模型调用凭据与 CLI 登录凭据始终分离：
-
-| 凭据 | 用途 | 是否进入 CLI |
+| 凭据 | 用途 | 本地保存 |
 | --- | --- | --- |
-| 网页 JWT / OAuth / 2FA | 登录 BeeAPI、查看并批准设备 | 否 |
-| 短期 CLI 令牌 | 一次领取本次设备授权批准的 Key 集合 | 是，进程内短暂保存 |
-| 账户现有 API Key | Claude Code、Codex 等模型调用 | 批准后一次性交付并独立安全保存 |
+| 网页 JWT / 第三方登录 / 2FA | 登录 BeeAPI、查看并批准 OAuth 请求 | 不进入 CLI |
+| `boa_` OAuth Access Token | 读取获准的账户资源 | 与 DPoP 私钥一起安全保存 |
+| `bor_` Refresh Token | 轮换短期 Access Token | 与 DPoP 私钥一起安全保存 |
+| 账户现有 `sk-` API Key | Claude Code、Codex 等模型调用 | 仅保存用户在终端选中的 Key |
 
-用户在 BeeAPI 官方页面核对并批准设备，不在网页选择 Key。批准时服务端快照账户当时的 API Key；CLI 领取时返回其中仍然可用且可导出的现有 Key，不创建新的 Key。不可导出的 Key 以 `skipped` 元数据返回，不能从哈希伪造或重建明文。
+账户 Token 只能进入 `/api/v1/oauth/**`，不能进入 `/v1`、`/v1beta`、`/api/v1/me`、管理端或模型代理。普通 `sk-` Key 也不能反向访问 OAuth 账户资源。CLI 是 public client，没有 `client_secret`，不接收账户密码、2FA 验证码或网页 Cookie。
 
-CLI 是 public client，不配置 `client_secret`，不接收账号密码，也不读取网页登录 Cookie。每次授权在进程内生成临时 P-256 密钥，设备码、轮询和领取请求都以同一 JWK 生成 DPoP proof；CLI 退出后不持久化该私钥。
+OAuth Token 与 P-256 DPoP 私钥存进同一个系统凭据记录；普通 `oauth-account.json` 只保存 issuer、client ID、scope、账户展示信息和凭据引用。API Key 各自进入独立凭据槽。Linux 优先 Secret Service，macOS 优先 Keychain，Windows 优先当前用户 DPAPI；回退文件权限仅限当前用户。
 
-## 完整流程
+## Canonical issuer 与发现
+
+唯一 issuer 是：
 
 ```text
-CLI 创建 device code
-  → 浏览器打开 BeeAPI /cli/authorize
-  → 用户登录、核对设备与 user_code
-  → 用户确认授权此设备读取账户当前可用 Key
-  → CLI 轮询得到短期 DPoP 令牌
-  → CLI 一次领取账户现有可用 Key 与跳过说明
-  → 逐个读取模型与协议能力
-  → 用户为每个本地工具选择 Key 与模型
-  → 凭据安全保存，配置统一备份后写入
+https://beeapi.dev
 ```
 
-`getbeeapi.com` 只提供官网、安装器和固定白名单发行缓存，不承载 BeeAPI 账户登录或授权数据。
-
-## 1. 创建设备授权
+`beeapi.ai` 可以提供同一份 discovery 作为入口别名，但返回字段必须全部指向上述 issuer。CLI 严格拒绝其他 issuer、非默认 HTTPS 端口和跨 issuer 授权端点，避免用户选择备用 API 入口后又被带回不可访问的域名，也避免 DPoP `htu` 混淆。
 
 ```http
-POST /api/v1/auth/device/code
-Content-Type: application/json
+GET /.well-known/oauth-authorization-server
+```
+
+关键 metadata：
+
+```json
+{
+  "issuer": "https://beeapi.dev",
+  "authorization_endpoint": "https://beeapi.dev/oauth/authorize",
+  "device_authorization_endpoint": "https://beeapi.dev/oauth/device/code",
+  "token_endpoint": "https://beeapi.dev/oauth/token",
+  "revocation_endpoint": "https://beeapi.dev/oauth/revoke",
+  "response_types_supported": ["code"],
+  "grant_types_supported": [
+    "authorization_code",
+    "refresh_token",
+    "urn:ietf:params:oauth:grant-type:device_code"
+  ],
+  "code_challenge_methods_supported": ["S256"],
+  "token_endpoint_auth_methods_supported": ["none"],
+  "scopes_supported": [
+    "account:profile:read",
+    "account:balance:read",
+    "api_keys:read",
+    "api_keys:export",
+    "offline_access"
+  ],
+  "dpop_signing_alg_values_supported": ["ES256"]
+}
+```
+
+## 桌面：Authorization Code + PKCE
+
+桌面环境监听随机 `127.0.0.1` 端口，生成高熵 `state`、PKCE verifier 和 S256 challenge，再打开：
+
+```http
+GET https://beeapi.dev/oauth/authorize
+  ?response_type=code
+  &client_id=getbeeapi-cli-v2
+  &redirect_uri=http://127.0.0.1:<random>/oauth/callback
+  &scope=account:profile:read account:balance:read api_keys:read api_keys:export offline_access
+  &state=<random>
+  &code_challenge=<S256>
+  &code_challenge_method=S256
+  &device_name=<hostname>
+  &platform=<os/arch>
+```
+
+BeeAPI 登录页安全保留站内授权请求。批准或拒绝后，浏览器回到精确的 loopback URI，并携带 `state` 与 `iss=https://beeapi.dev`。CLI 在接受 `code` 前同时验证 exact path、state 和 issuer；回调页面使用固定 HTML，不反射服务端错误描述，并提醒用户等终端确认“账户已连接”后再结束流程。
+
+CLI 随后使用同一枚 DPoP 密钥交换 Token：
+
+```http
+POST https://beeapi.dev/oauth/token
+Content-Type: application/x-www-form-urlencoded
 DPoP: <ES256 proof>
 
-{
-  "client_id": "getbeeapi-cli",
-  "scope": "cli:configure",
-  "device_name": "DESKTOP-01",
-  "platform": "windows/amd64"
-}
+grant_type=authorization_code&client_id=getbeeapi-cli-v2&code=...&redirect_uri=...&code_verifier=...
 ```
+
+授权码交换响应若在传输中断开，CLI 会在同一进程内使用原 code、redirect URI、verifier 与同一 DPoP 密钥重试；服务端在短期 AEAD 窗口内返回同一 Token family，不签发第二套令牌。账户 Token 一经安全保存，即使尚未完成 Key 选择，下次运行也会默认继续该连接；只有高敏导出权限已经过期时才重新打开网页确认。
+
+## SSH / 无桌面：标准 Device Grant
+
+SSH 不启动本机浏览器，而是使用同一套 scope 和 DPoP 密钥请求：
+
+```http
+POST https://beeapi.dev/oauth/device/code
+Content-Type: application/x-www-form-urlencoded
+DPoP: <ES256 proof>
+
+client_id=getbeeapi-cli-v2&scope=...&device_name=...&platform=linux/amd64
+```
+
+CLI 必须始终打印 `verification_uri_complete` 和 `user_code`，让用户在自己的电脑或手机打开；`--no-open` 和浏览器启动失败也不能隐藏网址。轮询：
+
+```http
+POST https://beeapi.dev/oauth/token
+Content-Type: application/x-www-form-urlencoded
+DPoP: <使用同一密钥的 ES256 proof>
+
+grant_type=urn:ietf:params:oauth:grant-type:device_code&client_id=getbeeapi-cli-v2&device_code=...
+```
+
+CLI 至少遵守 5 秒间隔，`authorization_pending` 继续等待，`slow_down` 将后续间隔永久增加 5 秒。暂时网络错误和 5xx 不丢弃本次授权；`access_denied`、`expired_token` 与 `invalid_grant` 才结束。
+
+两种流程成功后都返回同一种 Token：
 
 ```json
 {
-  "code": 0,
-  "message": "ok",
-  "data": {
-    "device_code": "high-entropy-secret",
-    "user_code": "BEE7-K9Q2",
-    "verification_uri": "https://beeapi.ai/cli/authorize",
-    "verification_uri_complete": "https://beeapi.ai/cli/authorize?user_code=BEE7-K9Q2",
-    "expires_in": 600,
-    "interval": 5
-  }
+  "access_token": "boa_...",
+  "refresh_token": "bor_...",
+  "token_type": "DPoP",
+  "expires_in": 600,
+  "scope": "account:profile:read account:balance:read api_keys:read api_keys:export offline_access"
 }
 ```
 
-CLI 必须始终在终端显示完整的 `verification_uri_complete` 与 `user_code`，再尝试自动打开浏览器。SSH、无桌面环境或使用 `--no-open` 时不尝试本机跳转，而是提示用户在自己的电脑或手机浏览器打开该网址；自动打开失败也不能隐藏链接。若创建设备码接口返回 `404`、`405` 或 `501`，服务端没有生成 `device_code`，此时普通账户登录页不能代替本次设备授权，CLI 应明确说明并提供 API Key 回退。
+Refresh Token 单次使用并轮换，检测 reuse 时撤销整个 family；响应中断可在短期窗口内幂等恢复。刷新后的 scope 不再包含高敏 `api_keys:export`，因此以后导出新 Key 必须重新执行交互授权。
 
-创建请求的 proof 必须包含正确的 `typ`、`alg`、公开 JWK、`htm=POST`、无查询参数的绝对 `htu`、时间窗口内的 `iat` 与一次性 `jti`。服务端保存 JWK thumbprint，并拒绝 proof 重放。
+## 账户与 Key 资源
 
-## 2. 网页批准
+每个受保护请求都使用：
 
-授权页面位于 BeeAPI 官方域名的 `/cli/authorize`。页面应显示应用名、设备名、平台、发起时间、粗略地区、`user_code`，以及当前可导出和不可导出的 Key 数量。页面只提供批准或拒绝，并明确说明批准后该设备将取得账户在本次批准时可导出的现有 API Key。
+```http
+Authorization: DPoP boa_...
+DPoP: <proof with htm, exact htu, iat, unique jti, ath>
+```
 
-账户管理接口只接受 JWT 网页会话：
+资源路径：
 
 ```text
-GET  /api/v1/me/cli-authorizations/lookup?user_code=...
-GET  /api/v1/me/cli-authorizations/:ref
-POST /api/v1/me/cli-authorizations/:ref/approve
-POST /api/v1/me/cli-authorizations/:ref/deny
-POST /api/v1/me/cli-authorizations/:ref/revoke
+GET /api/v1/oauth/account
+GET /api/v1/oauth/account/balance
+GET /api/v1/oauth/api-keys
+GET /api/v1/oauth/api-keys/:id/model-options
 ```
 
-批准请求提交 `user_code` 和可选的 `step_up_code`，不提交 Key 选择。启用 2FA 的账户执行 step-up。批准成功只提示返回 CLI，网页绝不显示任何 Key 明文。
+账户资料包含数字 `id`、`email`、可选 `username` / `avatar` 与 `preferred_locale`。余额为：
 
-## 3. 轮询短期 CLI 令牌
-
-```http
-POST /api/v1/auth/device/token
-Content-Type: application/json
-DPoP: <使用同一临时密钥的 ES256 proof>
-
-{
-  "client_id": "getbeeapi-cli",
-  "device_code": "high-entropy-secret"
-}
+```json
+{ "available": 12.5, "currency": "USD" }
 ```
 
-批准后返回：
+Key 元数据不包含明文：
 
 ```json
 {
-  "code": 0,
-  "message": "ok",
-  "data": {
-    "access_token": "bclt_short_lived_secret",
-    "token_type": "DPoP",
-    "expires_in": 300,
-    "scope": "cli:configure"
-  }
+  "items": [
+    {
+      "id": 42,
+      "name": "日常开发",
+      "key_prefix": "sk-live-12ab",
+      "status": "enabled",
+      "expires_at": null,
+      "last_used_at": null,
+      "exportable": true,
+      "unavailable_reason": "",
+      "route_groups": []
+    }
+  ]
 }
 ```
 
-CLI 遵守服务端返回的轮询间隔；收到 `slow_down` 后永久增加至少 5 秒。短期令牌没有 refresh token，不能进入 `/me`、模型转发或其他账户接口。
+`model-options` 返回该 Key 的真实有效路由所支持的 `id`、`protocols`、`capabilities`、`recommended_for`、`priority` 及上下文限制。服务端的唯一递减 `priority` 已编码 API Key 路由优先级和 BeeAPI 商家市场排序；CLI 去重、按目标工具协议过滤，并仅依据该服务端 `priority` 排序，不叠加客户端模型名称猜测或私有偏好。
 
-## 4. 一次领取账户现有 Key
+## 选择性一次性导出
+
+CLI 先展示账户、余额、每个 Key 的状态及模型能力。用户在终端输入一个或多个编号后，CLI 才请求对应数字 ID（最多 10 个）：
 
 ```http
-POST /api/v1/cli/credentials/claim
-Authorization: DPoP bclt_short_lived_secret
-DPoP: <ES256 proof，包含 ath=base64url(sha256(access_token))>
+POST /api/v1/oauth/api-key-exports
+Authorization: DPoP boa_...
+DPoP: <proof>
+Idempotency-Key: <至少 16 字符的高熵随机值>
 Content-Type: application/json
 
-{}
+{ "api_key_ids": [42, 57] }
 ```
+
+响应：
 
 ```json
 {
-  "code": 0,
-  "message": "ok",
-  "data": {
-    "credential_mode": "existing_key_export_v2",
-    "credentials": [
-      {
-        "credential_id": "opaque-key-bound-id",
-        "key_name": "日常开发",
-        "key_prefix": "sk-live-12ab",
-        "status": "enabled",
-        "expires_at": null,
-        "api_key": "EXISTING-API-KEY-PLAINTEXT"
-      }
-    ],
-    "skipped": [
-      {
-        "credential_id": "opaque-key-bound-id-2",
-        "key_name": "旧密钥",
-        "key_prefix": "sk-old-34cd",
-        "status": "enabled",
-        "expires_at": null,
-        "reason": "plaintext_unavailable"
-      }
-    ],
-    "retry_until": "2026-08-28T12:00:00Z"
-  }
+  "export_id": "boex_...",
+  "credentials": [
+    {
+      "api_key_id": 42,
+      "key_name": "日常开发",
+      "key_prefix": "sk-live-12ab",
+      "status": "enabled",
+      "expires_at": null,
+      "api_key": "sk-PLAINTEXT-ONCE"
+    }
+  ],
+  "skipped": [
+    {
+      "api_key_id": 57,
+      "key_name": "旧密钥",
+      "key_prefix": "sk-old-34cd",
+      "reason": "plaintext_unavailable"
+    }
+  ],
+  "retry_until": "2026-09-01T12:10:00Z"
 }
 ```
 
-领取资格至少要求 Key 属于批准账户、未删除、状态为 `enabled`、未过期、未自动停用、不是旧版设备专用 Key、明文存在且与哈希一致。成功载荷只在短暂的 `retry_until` 窗口内以 AEAD/KMS 密文保存，用于响应中断后的幂等重试；窗口结束后不能再次取得明文。所有受保护请求都验证 DPoP 签名、`htm`、`htu`、`iat`、未使用过的 `jti`、令牌绑定 JWK 与 `ath`。
+相同 `Idempotency-Key` 与相同 ID 集合可在 `retry_until` 前恢复同一 AEAD 密文响应；CLI 遇到暂时网络错误或 5xx 时必须复用完全相同的幂等键和 ID 集合。相同 Key 配不同请求返回冲突。历史只保存哈希、已失效、已删除或明文校验不一致的 Key 进入 `skipped`，服务端不会尝试重建明文。
 
-CLI 验证每个返回项都有非空 `credential_id` 与 `api_key`，对 `skipped` 显示明确原因，再逐个读取模型能力。若没有任何可用凭据，首次配置不会写入工具文件。
+CLI 的提交顺序不可改变：
 
-## 5. 模型能力
+```text
+收到导出结果
+  → 每枚 Key 写入系统凭据存储
+  → 写入仅含凭据引用、export_id 和 retry_until 的 pending checkpoint
+  → POST /api/v1/oauth/api-key-exports/:export_id/ack
+  → 服务端清除导出密文
+  → 读取/复用模型能力
+  → 选择工具与模型
+  → 统一备份并配置
+  → 完成后清除 checkpoint
+```
 
-标准 `/v1/models` 只能可靠提供模型 ID 等基础字段，不能证明某条 BeeAPI 路由是否支持 Codex 所需的 Responses、Anthropic Messages 或 Gemini 协议。CLI 应优先调用 API-Key 鉴权的专用模型选项接口，读取 `protocols`、`capabilities`、`recommended_for` 与 `priority`；其中 `recommended_for` 同时约束协议与客户端适配性，`priority` 是服务端给出的最终顺序：先尊重该 API Key 的路由优先级，同一路由内再沿用 BeeAPI 商家市场的模型排列（通用模型先于辅助模型、同系列聚合、新版本优先、同版本基础模型先于 `mini` 等变体）。CLI 只按更高的 `priority` 优先，不再用模型名称、上下文长度或本地偏好覆盖服务端顺序。旧服务端没有该接口时才回退 `/v1/models?include_aliases=false`，并把结果称为“可用模型”，不能声称已完成协议适配。
-
-## 本地多凭据行为
-
-- 每个获准导出的账户 Key 拥有独立的本地 ID 与安全存储槽；opaque ID 不直接用作文件名或钥匙串账户名。
-- Linux 优先 Secret Service，macOS 优先 Keychain，Windows 优先当前用户 DPAPI；回退文件权限为 `0600`。
-- 用户可为不同工具选择不同凭据和模型。若当前或刚输入的 Key 没有目标工具所需的兼容模型，CLI 会说明原因并列出其他兼容 Key 供重新选择；只有一个兼容 Key 时自动选用，所有 Key 都不兼容时才停止。Claude Code 与 Claude Desktop Code 共享设置，因此必须使用同一凭据与模型。
-- Codex 默认配置中的 BeeAPI provider 使用 `beeapi token print --agent codex` 按工具读取已分配的凭据，不把 Key 明文写进 `config.toml`，也不修改 `auth.json`。
-- 手动粘贴模式只产生一个本地凭据。
-- 设备授权撤销只能阻止再次领取，不能让已经导出的共享 Key 自动失效；需要停用原 Key 才能使其失效。
+ACK 幂等。ACK 或后续配置中断时，下一次 `beeapi` 从 checkpoint 继续，不需要再次网页授权；恢复时必须先逐一读取并验证全部本地 Key，确认都可用后才能补发 ACK 或放弃已过期的服务端恢复窗口。用户也可以选择丢弃 checkpoint 并重新授权。若 ACK 返回 `oauth.export_acknowledged`，CLI 视为收尾完成；若本地 Key 已保存而服务端返回 `oauth.export_unavailable`，CLI 清理过期导出引用并继续使用本地 Key。没有可验证的本地 checkpoint 时绝不能把 `export_unavailable` 当作成功。
 
 ## 错误语义
 
-| `reason` / 错误码 | CLI 行为 |
+| reason / OAuth error | CLI 行为 |
 | --- | --- |
 | `authorization_pending` | 按当前间隔继续轮询 |
-| `slow_down` | 后续轮询间隔增加 5 秒 |
-| `access_denied` | 立即停止并提示用户拒绝 |
-| `expired_token` | 停止并要求重新发起授权 |
-| `invalid_dpop_proof` / `cli.invalid_dpop_proof` | 停止，不能降级绕过 DPoP |
-| `credential_unavailable` / `cli.credential_unavailable` | 批准快照中的 Key 已不可用，按 `skipped` 原因处理 |
-| `cli.claim_unavailable` | 幂等领取窗口已失效，重新授权 |
-| `cli.invalid_token` | CLI 令牌无效或过期，重新授权 |
+| `slow_down` | 后续间隔增加 5 秒 |
+| `access_denied` | 立即停止并说明用户拒绝 |
+| `expired_token` / `invalid_grant` | 重新发起授权 |
+| `oauth.invalid_dpop_proof` | 停止；不得降级为 Bearer |
+| `oauth.insufficient_scope` | 重新交互授权所需 scope |
+| `oauth.step_up_required` | 返回网页完成交互或 2FA step-up |
+| `oauth.idempotency_conflict` | 停止本次导出；重新选择时生成新幂等键，不复用冲突请求 |
+| `oauth.export_acknowledged` | 视本地 checkpoint 情况完成清理，不再领取 |
+| `oauth.export_unavailable` | 短期恢复窗口已过；若本地未保存则重新授权 |
+| `plaintext_unavailable` | 展示并跳过该 Key |
 
-服务端返回 `404`、`405` 或 `501` 时，CLI 可以明确提供“手动粘贴 API Key”兼容回退，但绝不要求用户在终端输入 BeeAPI 账户密码。
+## 兼容回退
+
+OAuth discovery 返回 `404`、`405`、`501`，或官方入口明确返回前端 SPA HTML / 空 metadata 时，新 CLI 可以临时尝试旧 `getbeeapi-cli + cli:configure` 设备流；用户也可以直接选择粘贴单个 API Key。只要 metadata 已出现任何 OAuth 字段，issuer、端点或 DPoP 能力不可信就必须失败关闭，不能借兼容逻辑降级。OAuth 已被发现后，如果授权被拒绝、DPoP 校验失败或资源请求出错，CLI 不静默降级到权限更宽或安全性更低的方式，而是保留可恢复状态并明确报错。
+
+`getbeeapi.com` 只提供产品页、安装器、固定白名单发行缓存与 Release metadata，不承载账户登录、OAuth 回调中转、Token 或 API Key。
