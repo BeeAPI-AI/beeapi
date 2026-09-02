@@ -123,7 +123,7 @@ func TestManageProfilesRefusesToDeleteActiveProfile(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	input := strings.NewReader("2\n1\n")
+	input := strings.NewReader("1\n2\n1\n")
 	var output bytes.Buffer
 	r := &runner{store: store, in: input, reader: bufio.NewReader(input), out: &output, errOut: &output}
 	err := r.manageProfilesInteractive()

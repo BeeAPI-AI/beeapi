@@ -105,7 +105,16 @@ func Run(ctx context.Context, args []string, version string, in io.Reader, out, 
 			return nil
 		}
 		if !cfg.Initialized() {
-			return r.setupWithRecovery(nil)
+			if err := r.setupWithRecovery(nil); err != nil {
+				return err
+			}
+			cfg, err = store.LoadConfig()
+			if err != nil {
+				return err
+			}
+			if !cfg.Initialized() {
+				return nil
+			}
 		}
 		return r.home()
 	}
@@ -121,6 +130,9 @@ func Run(ctx context.Context, args []string, version string, in io.Reader, out, 
 	case "logout", "disconnect":
 		return r.disconnectOAuthAccount()
 	case "configure", "config":
+		if len(args) == 1 {
+			return r.configureToolInteractive()
+		}
 		return r.configure(args[1:])
 	case "network":
 		return r.network(args[1:])
@@ -169,10 +181,10 @@ Usage:
   beeapi                         First run: set up; later: open the main menu
   beeapi setup                   Run first-time setup again
   beeapi status                  Show the current connection and tool configuration
-  beeapi login                   Authorize again or update API Key configurations
+  beeapi login                   Reconnect the BeeAPI account
   beeapi logout                  Revoke the OAuth account connection; keep saved API Keys
   beeapi detect                  Detect installed AI CLI tools
-  beeapi configure               Reconfigure using saved credentials
+  beeapi configure               Open the single-tool configuration wizard
   beeapi network status          Check the built-in API domains
   beeapi network optimize        Select an optimized IP with CloudflareSpeedTest
   beeapi network restore         Remove Hosts entries managed by beeapi
@@ -182,7 +194,7 @@ Usage:
   beeapi run <tool> [args...]    Compatibility/troubleshooting launcher
   beeapi token print [--agent tool] Print the saved API Key for the target tool only
 
-Supported: Claude Code, Claude Desktop (Code), Codex, Gemini CLI, Grok Build, OpenCode, OpenClaw, Hermes`)
+Supported: Claude Code, Claude Desktop, Codex, Gemini CLI, Grok Build, OpenCode, OpenClaw, Hermes`)
 		return
 	}
 	fmt.Fprintln(out, `beeapi — 为现有 AI 工具快速配置 BeeAPI
@@ -191,10 +203,10 @@ Supported: Claude Code, Claude Desktop (Code), Codex, Gemini CLI, Grok Build, Op
   beeapi                         首次运行初始化；以后打开功能主页
   beeapi setup                   重新运行首次设置
   beeapi status                  查看当前连接与工具配置
-  beeapi login                   重新授权或更新密钥配置
+  beeapi login                   重新连接 BeeAPI 账户
   beeapi logout                  撤销 OAuth 账户连接；保留已保存 API Key
   beeapi detect                  检查本机已安装的 AI CLI
-  beeapi configure               使用已保存凭据重新配置
+  beeapi configure               打开单工具配置向导
   beeapi network status          检测内置 API 域名
   beeapi network optimize        使用 CloudflareSpeedTest 优选 IP
   beeapi network restore         移除 beeapi 管理的 Hosts 记录
@@ -204,10 +216,10 @@ Supported: Claude Code, Claude Desktop (Code), Codex, Gemini CLI, Grok Build, Op
   beeapi run <工具> [参数...]    兼容/排障方式启动目标工具
   beeapi token print [--agent 工具] 仅向目标工具提供已保存的 API Key
 
-支持: Claude Code、Claude Desktop（Code）、Codex、Gemini CLI、Grok Build、OpenCode、OpenClaw、Hermes`)
+支持: Claude Code、Claude Desktop、Codex、Gemini CLI、Grok Build、OpenCode、OpenClaw、Hermes`)
 }
 
-func (r *runner) setup(args []string) error {
+func (r *runner) legacySetup(args []string) error {
 	flags := flag.NewFlagSet("setup", flag.ContinueOnError)
 	flags.SetOutput(r.errOut)
 	var endpointFlag, apiKeyFlag, agentsFlag string
@@ -656,7 +668,7 @@ func parseAgents(raw string) ([]string, error) {
 	return agents, nil
 }
 
-func (r *runner) authorize(endpoint string, noOpen bool, mode string) (authorizationResult, error) {
+func (r *runner) authorize(endpoint string, noOpen bool, mode string, agents ...string) (authorizationResult, error) {
 	if r.store != nil {
 		existing, loadErr := r.store.LoadOAuthAccount()
 		if loadErr != nil {
@@ -668,7 +680,7 @@ func (r *runner) authorize(endpoint string, noOpen bool, mode string) (authoriza
 				return authorizationResult{}, issuerErr
 			}
 			if existing.Issuer == selectedIssuer {
-				return r.authorizeWithExistingOAuth(existing, endpoint, noOpen, mode)
+				return r.authorizeWithExistingOAuth(existing, endpoint, noOpen, mode, agents...)
 			}
 			r.line(r.out, "  BeeAPI 入口已切换到另一 OAuth 安全域，必须重新进行网页授权。", "  The BeeAPI endpoint changed to another OAuth security domain; browser authorization is required again.")
 		}
@@ -692,12 +704,12 @@ func (r *runner) authorize(endpoint string, noOpen bool, mode string) (authoriza
 	}
 	oauthClient, _, account, oauthErr := r.authorizeOAuthAccount(endpoint, noOpen)
 	if oauthErr == nil {
-		result, selectErr := r.selectAndExportOAuthCredentials(oauthClient, account, endpoint, mode)
+		result, selectErr := r.selectAndExportOAuthCredentials(oauthClient, account, endpoint, mode, agents...)
 		if selectErr == nil || !oauthInteractiveAuthorizationRequired(selectErr) {
 			return result, selectErr
 		}
 		r.line(r.out, "  OAuth 会话需要重新确认，正在生成新的网页授权。", "  The OAuth session needs renewed approval; creating a new browser authorization.")
-		return r.authorizeAndSelectOAuthCredentials(endpoint, noOpen, mode)
+		return r.authorizeAndSelectOAuthCredentials(endpoint, noOpen, mode, agents...)
 	}
 	if !oauthCapabilityUnavailable(oauthErr) {
 		return authorizationResult{}, oauthErr
@@ -898,11 +910,6 @@ func (r *runner) selectCredentialAssignments(agents []string, credentials []cred
 	assignments := map[string]string{}
 	r.line(r.out, "\n  为每个工具选择 BeeAPI API Key", "\n  Choose a BeeAPI API Key for each tool")
 	for _, agent := range agents {
-		if peer := sharedClaudePeer(agent); peer != "" && assignments[peer] != "" {
-			assignments[agent] = assignments[peer]
-			r.format(r.out, "    %s 与 %s 共享本地配置，使用同一密钥配置\n", "    %s and %s share local configuration and will use the same API Key\n", agentLabel(agent), agentLabel(peer))
-			continue
-		}
 		compatible := compatibleCredentialIndexes(agent, credentials)
 		if len(compatible) == 0 {
 			return nil, fmt.Errorf(r.text("所有已读取的 API Key 都没有支持 %s 所需的 %s 模型", "None of the loaded API Keys has a %s-compatible %s model"),
@@ -1002,17 +1009,6 @@ func compatibleModelCount(agent string, credential credentialMaterial) int {
 	return len(models)
 }
 
-func sharedClaudePeer(agent string) string {
-	switch agent {
-	case "claude":
-		return "claude-desktop"
-	case "claude-desktop":
-		return "claude"
-	default:
-		return ""
-	}
-}
-
 func credentialIndex(credentials []credentialMaterial, id string) int {
 	for index, credential := range credentials {
 		if credential.ID == id {
@@ -1037,10 +1033,6 @@ func (r *runner) selectModelsForAssignmentsWithDefaults(agents []string, credent
 	selected := map[string]string{}
 	r.line(r.out, "\n  为每个工具选择模型", "\n  Choose a model for each tool")
 	for _, agent := range agents {
-		if peer := sharedClaudePeer(agent); peer != "" && selected[peer] != "" {
-			selected[agent] = selected[peer]
-			continue
-		}
 		credential, ok := credentialForID(credentials, assignments[agent])
 		if !ok || len(credential.Models) == 0 {
 			return nil, fmt.Errorf(r.text("%s 没有可用的密钥配置或模型", "%s has no usable API Key configuration or model"), agentLabel(agent))
@@ -1265,7 +1257,14 @@ func compatibleModelsForAgent(agent string, credential credentialMaterial) ([]st
 		if len(credential.Models) == 0 {
 			return nil, errors.New("没有可用模型")
 		}
-		return append([]string(nil), credential.Models...), nil
+		models := append([]string(nil), credential.Models...)
+		if agent == "claude-desktop" {
+			models = filterClaudeDesktopModels(models)
+			if len(models) == 0 {
+				return nil, errors.New("Claude Desktop 直连模式需要 claude-sonnet-*、claude-opus-* 或 claude-haiku-* 模型，请选择其他 Key")
+			}
+		}
+		return models, nil
 	}
 	requiredProtocol := agentProtocol(agent)
 	if requiredProtocol == "" {
@@ -1273,7 +1272,8 @@ func compatibleModelsForAgent(agent string, credential credentialMaterial) ([]st
 	}
 	options := make([]beeapi.ModelOption, 0, len(credential.ModelOptions))
 	for _, option := range credential.ModelOptions {
-		if containsExact(option.Protocols, requiredProtocol) && optionSupportsAgent(agent, option) {
+		if containsExact(option.Protocols, requiredProtocol) && optionSupportsAgent(agent, option) &&
+			(agent != "claude-desktop" || validClaudeDesktopModelID(option.ID)) {
 			options = append(options, option)
 		}
 	}
@@ -1290,6 +1290,22 @@ func compatibleModelsForAgent(agent string, credential credentialMaterial) ([]st
 	return models, nil
 }
 
+func validClaudeDesktopModelID(value string) bool {
+	model := strings.ToLower(strings.TrimSpace(value))
+	model = strings.TrimPrefix(model, "anthropic/")
+	return strings.HasPrefix(model, "claude-sonnet-") || strings.HasPrefix(model, "claude-opus-") || strings.HasPrefix(model, "claude-haiku-")
+}
+
+func filterClaudeDesktopModels(models []string) []string {
+	filtered := make([]string, 0, len(models))
+	for _, model := range models {
+		if validClaudeDesktopModelID(model) {
+			filtered = append(filtered, model)
+		}
+	}
+	return filtered
+}
+
 func optionSupportsAgent(agent string, option beeapi.ModelOption) bool {
 	for _, tag := range agentRecommendationTags(agent) {
 		if containsExact(option.RecommendedFor, tag) {
@@ -1301,8 +1317,10 @@ func optionSupportsAgent(agent string, option beeapi.ModelOption) bool {
 
 func agentRecommendationTags(agent string) []string {
 	switch agent {
-	case "claude", "claude-desktop":
+	case "claude":
 		return []string{"claude_code"}
+	case "claude-desktop":
+		return []string{"claude_desktop", "claude_code"}
 	case "codex":
 		return []string{"codex"}
 	case "gemini":
@@ -1438,7 +1456,7 @@ func (r *runner) configure(args []string) error {
 		return err
 	}
 	result, err := configurator.Apply(r.store, configurator.Options{
-		Endpoint: cfg.Endpoint, APIKeys: apiKeys, Models: models, Agents: agents, BinaryPath: cfg.BinaryPath,
+		Endpoint: cfg.Endpoint, APIKeys: apiKeys, Models: models, ReasoningEfforts: cfg.ReasoningEfforts, Agents: agents, BinaryPath: cfg.BinaryPath,
 	})
 	if err != nil {
 		return err
@@ -1631,7 +1649,7 @@ func (r *runner) runAgent(args []string) error {
 		if cfg.Endpoint == "" {
 			return errors.New(r.text("尚未完成首次设置，请先直接运行 beeapi", "First-time setup is not complete; run beeapi first"))
 		}
-		return openURL("claude://code/new")
+		return openURL("claude://claude.ai/new")
 	}
 	commandName := map[string]string{
 		"claude": "claude", "codex": "codex", "gemini": "gemini", "grok": "grok",
@@ -1682,6 +1700,9 @@ func agentEnvironment(agent string, cfg state.Config, secret string) []string {
 	case "claude":
 		return []string{"ANTHROPIC_AUTH_TOKEN=" + secret, "ANTHROPIC_BASE_URL=" + cfg.Endpoint + "/anthropic", "ANTHROPIC_MODEL=" + model}
 	case "gemini":
+		if strings.TrimSpace(cfg.ReasoningEfforts[agent]) != "" {
+			model = configurator.GeminiBeeAPIAlias
+		}
 		return []string{"GOOGLE_GEMINI_BASE_URL=" + cfg.Endpoint, "GEMINI_API_KEY=" + secret, "GEMINI_MODEL=" + model}
 	case "grok":
 		return []string{"BEEAPI_API_KEY=" + secret}

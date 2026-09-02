@@ -8,21 +8,23 @@
 beeapi
   ├─ 未初始化 → 显示 Logo → 首次选择并保存界面语言 → 三步首次设置
   │    ├─ 1. 选择可用入口，必要时优选 IP
-  │    ├─ 2. OAuth 连接账户/粘贴单 Key，选择既有 Key 与模型能力
-  │    └─ 3. 识别工具、分配密钥与模型、备份并写入
-  └─ 已初始化 → 显示 Logo、当前方案/余额/工具摘要与功能主页
-       ├─ 快速切换、新建或编辑命名配置方案
-       ├─ 管理方案名称与删除未使用方案
-       ├─ 查看账户余额及全部 Key 状态
-       ├─ 启动已配置的 AI 工具
-       ├─ 重新连接 / 更新密钥
-       └─ 更多设置
+  │    ├─ 2. OAuth 连接账户或粘贴单 Key
+  │    └─ 3. 保存账户与入口，进入主页
+  └─ 已初始化 → 显示 Logo、余额与四项功能主页
+       ├─ 1. 配置一个 AI 工具
+       │    └─ 工具 → 一枚 Key → 模型 → 工具专属参数 → 方案名称 → 启用
+       ├─ 2. 查看当前配置，并按工具切换方案
+       ├─ 3. 启动已配置的 AI 工具
+       └─ 4. 设置
+            ├─ 查看账户余额及本机 Key
+            ├─ 按工具重命名或删除未使用方案
+            ├─ 重新连接 BeeAPI 账户
             ├─ 切换界面语言
             ├─ 检测或优化网络入口
             ├─ 检查本机工具
             ├─ 恢复配置备份
             ├─ 检查并安装 CLI 更新
-            └─ 用户明确选择时重新运行首次设置
+            └─ 断开 OAuth 账户
 ```
 
 完成状态记录在本地配置的 schema 与初始化时间中，界面语言以 `zh-CN` 或 `en` 写入同一个本地配置。只有真正未初始化的交互式首次运行才显示语言选择；旧版用户按系统语言平滑补齐，不会打断 `token print` 等由工具调用的非交互命令。旧版已经包含入口和凭据后端的配置会自动视为已初始化，并在只改本地状态的前提下迁移为对应语言的“默认配置”或“Default”。迁移本身不触碰任何工具文件。凭据文件丢失不会让 CLI 假装成首次安装，用户仍可从主页选择“重新连接”。
@@ -66,9 +68,9 @@ OAuth 会话优先从账户资源读取当前余额；仅粘贴 API Key 的连�
 
 ## 命名配置方案与切换
 
-配置方案保存 BeeAPI 入口、目标工具、每个工具的凭据 ID 与模型，不保存 API Key 明文，也不复制目标工具的整份配置文件。首次设置创建第一套命名方案；旧版配置升级时自动生成“默认配置”。用户可以继续创建“工作开发”“日常对话”等方案，并通过 `beeapi` 首页的编号切换。
+配置方案按工具独立保存 BeeAPI 入口、凭据 ID、模型与工具专属参数，不保存 API Key 明文，也不复制目标工具的整份配置文件。首次 OAuth 只连接账户，不创建空方案；用户进入“配置 AI 工具”后一次只选择一个工具和一枚 Key，再命名为“工作”“日常”等方案。同名方案只要求在同一个工具内唯一，因此 Codex 与 Grok Build 都可以拥有自己的“日常”。
 
-切换采用两阶段写入：先把本批次涉及的全部工具文件放进同一个备份，再通过各格式的字段级合并器写入 BeeAPI 管理字段；全部工具文件成功后才更新本地活动方案映射。如果本地状态保存失败，会立即使用本次备份恢复工具文件。不同方案可以覆盖不同工具，所以状态同时记录每个工具正在使用的方案和入口；首页在它们不一致时显示“混合配置”。正在被任何工具使用的方案不能删除。
+每个工具可以保存多套方案，并维护独立的活动方案映射。切换 Codex 方案时只备份和写入 Codex 文件，不改 Grok Build、Gemini CLI 等工具；工具文件写入成功后才更新 Codex 的活动映射，如果本地状态保存失败则立即用本次备份恢复。旧版本创建的多工具方案仍可读取，切换时会投影为当前所选工具的一份独立配置。正在被该工具使用的方案不能删除。
 
 ## 环境识别与配置
 
@@ -76,20 +78,20 @@ OAuth 会话优先从账户资源读取当前余额；仅粘贴 API Key 的连�
 
 | 工具 | 检测依据 | 写入方式 |
 | --- | --- | --- |
-| Claude Code | `claude` 或 `~/.claude/settings.json` | 深度合并 `settings.json` 的 BeeAPI 环境变量 |
-| Claude Desktop（Code） | Claude Desktop 应用或本地配置 | 使用与 Claude Code 共享的 `~/.claude/settings.json`；`beeapi run claude-desktop` 通过官方深链打开 Code 模式 |
+| Claude Code | `claude` 或 `~/.claude/settings.json` | 深度合并 BeeAPI 环境变量；推理模型写入原生 `effortLevel` |
+| Claude Desktop | Claude Desktop 应用或本地配置 | Windows/macOS 写入独立的 Claude Desktop 3P 配置库与 gateway profile；Linux 明确提示暂不支持，不修改 Claude Code |
 | Codex | `codex` 或 `~/.codex/config.toml` | 语法级更新默认 `config.toml` 的 BeeAPI provider、模型与地址，使用 `beeapi token print --agent codex` 取凭据；保留其他 TOML 段与 `auth.json` |
-| Gemini CLI | `gemini` 或 `~/.gemini/settings.json` | 只更新 `~/.gemini/.env` 的 BeeAPI 连接变量及 `settings.json` 的 API Key 鉴权选择，保留其余设置 |
-| Grok Build | `grok` 或 `~/.grok/config.toml` | 在默认 `config.toml` 中更新 `model.beeapi` 与默认模型，保留 UI、MCP 和其他模型 |
-| OpenCode | `opencode` 或本地配置 | 深度合并 BeeAPI provider |
-| OpenClaw | `openclaw` 或本地配置 | 深度合并 BeeAPI provider 与默认模型 |
-| Hermes | `hermes` 或 `~/.hermes/config.yaml` | 只更新默认 `config.yaml` 的 `model` 连接字段及 `~/.hermes/.env` 的 OpenAI-compatible 凭据，保留 agent、MCP 等段落 |
+| Gemini CLI | `gemini` 或 `~/.gemini/settings.json` | 更新 BeeAPI 连接与专用 model alias；按模型代际写入 `thinkingLevel` 或 `thinkingBudget` |
+| Grok Build | `grok` 或 `~/.grok/config.toml` | 更新 `model.beeapi`、默认模型及该模型的原生 `reasoning_effort`，保留 UI、MCP 和其他模型 |
+| OpenCode | `opencode` 或本地配置 | 深度合并 BeeAPI provider；推理模型在 BeeAPI model options 中写入 `reasoningEffort` |
+| OpenClaw | `openclaw` 或本地配置 | 深度合并 BeeAPI provider、默认模型、能力声明与 `thinkingDefault` |
+| Hermes | `hermes` 或 `~/.hermes/config.yaml` | 更新 `model` 连接、原生 `agent.reasoning_effort` 及 `.env` 凭据，保留 MCP 等段落 |
 
-每个工具可以选择不同的账户现有 API Key 及该 Key 可用的模型。CLI 按服务端返回顺序保留 BeeAPI 的完整路由/商家市场排序，只根据 `protocols` 与 `recommended_for` 过滤目标工具不兼容项，不再用模型名称或本地规则重新排序。交互模式始终先列出 API Key（不兼容项保留展示但不可选），再列出所选 Key 的兼容模型，由用户分别确认；首次设置的 `--yes` 或命令行重配置等非交互路径才自动采用第一项。旧服务端缺少专用能力接口时才回退到基础模型列表。Claude Code 与 Claude Desktop Code 因共享同一设置文件，必须共用 Key 与模型。所有目标配置文件在第一次写入前归入同一个完整备份清单；任一写入失败就回滚整个批次。
+每个工具可以选择不同的账户现有 API Key 及该 Key 可用的模型，同一个工具也可以通过多套方案保存多组 Key/模型组合。CLI 按服务端返回顺序保留 BeeAPI 的完整路由/商家市场排序，只根据 `protocols`、`recommended_for` 和客户端硬性约束过滤不兼容项。交互模式先选工具，再列出 API Key（不兼容项保留展示但不可选），最后列出所选 Key 的兼容模型。只有服务端把所选模型标记为 `reasoning` 时才询问思考等级；Claude Code、Codex、Gemini CLI、Grok Build、OpenCode、OpenClaw 与 Hermes 各自使用原生字段和值域。Claude Desktop 当前没有稳定公开的持久化思考等级字段，因而不会显示一个无法生效的选项。
 
-配置写入采用与 CC Switch 相同的“投影区”思路：只接管 BeeAPI 连接所需字段。JSON 只深度合并目标键；TOML 只更新顶层模型选择和 BeeAPI 专属表；`.env` 只替换指定变量；Hermes YAML 只更新 `model` 的三个连接字段。注释与无关段落尽量原样保留，写入保持幂等。Codex 的 `auth.json` 不参与修改，API Key 由原生 provider auth command 从本地凭据槽按需读取。工具因此可以直接以 `codex`、`gemini`、`grok` 或 `hermes` 启动，不再依赖 Shell 注入；旧版 Shell 管理区块会先备份再移除。
+配置写入采用与 CC Switch 相同的“投影区”思路：只接管 BeeAPI 连接所需字段及用户明确选择的工具专属参数。JSON 只深度合并目标键；TOML 只更新顶层模型选择和 BeeAPI 专属表；`.env` 只替换指定变量；Hermes YAML 只更新 `model` 连接与 `agent.reasoning_effort`。注释与无关段落尽量原样保留，写入保持幂等。Codex 的 `auth.json` 不参与修改，API Key 由原生 provider auth command 从本地凭据槽按需读取。工具因此可以直接以 `codex`、`gemini`、`grok` 或 `hermes` 启动，不再依赖 Shell 注入；旧版 Shell 管理区块会先备份再移除。
 
-Claude Desktop 的适配范围是其中的 Code 模式：Anthropic 官方说明 Code 模式与 Claude Code 共享设置，因此能够使用 BeeAPI 配置。普通 Claude 聊天仍由 Anthropic 账户提供模型，不支持用本地配置替换底层 API，GetBeeAPI 不会把 MCP 连接伪装成模型替换。
+Claude Desktop 与 Claude Code 是两个独立适配器。Desktop 仅在 Windows/macOS 使用官方 3P gateway 配置，当前只开放可直连 BeeAPI Anthropic Messages 且模型 ID 属于 `claude-sonnet-*`、`claude-opus-*` 或 `claude-haiku-*` 的组合；切换后需要完全退出并重开 Desktop。3P 格式要求 API Key 出现在 Desktop 自己的 gateway profile 中，因此该文件会与其他目标文件一起备份并限制为当前用户可读。需要模型映射或协议转换的组合暂不伪装成可用，也不会通过修改 `~/.claude/settings.json` 冒充 Desktop 支持。
 
 ## 发布与安装
 

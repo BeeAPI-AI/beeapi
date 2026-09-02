@@ -18,7 +18,7 @@ import (
 
 const keyringService = "com.getbeeapi.cli"
 
-const CurrentSchemaVersion = 4
+const CurrentSchemaVersion = 5
 
 const CurrentPendingSetupVersion = 1
 
@@ -40,6 +40,7 @@ type Profile struct {
 	Endpoint         string            `json:"endpoint"`
 	DefaultModel     string            `json:"default_model,omitempty"`
 	Models           map[string]string `json:"models,omitempty"`
+	ReasoningEfforts map[string]string `json:"reasoning_efforts,omitempty"`
 	Agents           []string          `json:"agents,omitempty"`
 	AgentCredentials map[string]string `json:"agent_credentials,omitempty"`
 	CreatedAt        time.Time         `json:"created_at,omitempty"`
@@ -53,6 +54,7 @@ type Config struct {
 	KeyName           string            `json:"key_name,omitempty"`
 	DefaultModel      string            `json:"default_model,omitempty"`
 	Models            map[string]string `json:"models,omitempty"`
+	ReasoningEfforts  map[string]string `json:"reasoning_efforts,omitempty"`
 	Agents            []string          `json:"agents,omitempty"`
 	Credentials       []Credential      `json:"credentials,omitempty"`
 	AgentCredentials  map[string]string `json:"agent_credentials,omitempty"`
@@ -82,12 +84,15 @@ type PendingSetup struct {
 	LastError             string       `json:"last_error,omitempty"`
 }
 
-// Initialized deliberately accepts pre-schema config files produced by
-// GetBeeAPI v0.1.0. Endpoint + credential backend were only written after the
-// old setup completed, so they are a safe migration signal for returning users.
+// Initialized accepts both the explicit completion timestamp used by the
+// OAuth-first setup and pre-schema config files produced by GetBeeAPI v0.1.0.
+// Older versions only wrote endpoint + credential backend after setup ended.
 func (c Config) Initialized() bool {
 	if strings.TrimSpace(c.Endpoint) == "" {
 		return false
+	}
+	if !c.InitializedAt.IsZero() {
+		return true
 	}
 	for _, credential := range c.Credentials {
 		if strings.TrimSpace(credential.ID) != "" && strings.TrimSpace(credential.Backend) != "" {

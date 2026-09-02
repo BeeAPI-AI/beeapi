@@ -41,6 +41,7 @@ func profileFromCurrent(cfg state.Config, id, name string, now time.Time) state.
 		Endpoint:         endpoint,
 		DefaultModel:     cfg.DefaultModel,
 		Models:           cloneStringMap(cfg.Models),
+		ReasoningEfforts: cloneStringMap(cfg.ReasoningEfforts),
 		Agents:           append([]string(nil), cfg.Agents...),
 		AgentCredentials: cloneStringMap(cfg.AgentCredentials),
 		CreatedAt:        now,
@@ -58,6 +59,10 @@ func ensureProfileState(cfg *state.Config) bool {
 	changed := false
 	if cfg.Models == nil && len(cfg.Agents) > 0 {
 		cfg.Models = map[string]string{}
+		changed = true
+	}
+	if cfg.ReasoningEfforts == nil && len(cfg.Agents) > 0 {
+		cfg.ReasoningEfforts = map[string]string{}
 		changed = true
 	}
 	if cfg.AgentCredentials == nil && len(cfg.Agents) > 0 {
@@ -80,7 +85,7 @@ func ensureProfileState(cfg *state.Config) bool {
 			changed = true
 		}
 	}
-	if len(cfg.Profiles) == 0 {
+	if len(cfg.Profiles) == 0 && len(cfg.Agents) > 0 {
 		now := cfg.UpdatedAt
 		if now.IsZero() {
 			now = time.Now().UTC()
@@ -88,6 +93,9 @@ func ensureProfileState(cfg *state.Config) bool {
 		cfg.Profiles = []state.Profile{profileFromCurrent(*cfg, "default", defaultProfileNameForLanguage(cfg.Language), now)}
 		cfg.ActiveProfile = "default"
 		changed = true
+	}
+	if len(cfg.Profiles) == 0 {
+		return changed
 	}
 	if cfg.AgentEndpoints == nil && len(cfg.Agents) > 0 {
 		cfg.AgentEndpoints = map[string]string{}
@@ -481,12 +489,13 @@ func (r *runner) selectProfileCredentials(cfg *state.Config, endpoint, profileNa
 func (r *runner) collectProfileSelections(cfg *state.Config, base *state.Profile, name string) (state.Profile, error) {
 	currentEndpoint := cfg.Endpoint
 	var defaults []string
-	var existingAssignments, existingModels map[string]string
+	var existingAssignments, existingModels, existingReasoningEfforts map[string]string
 	if base != nil {
 		currentEndpoint = base.Endpoint
 		defaults = append([]string(nil), base.Agents...)
 		existingAssignments = base.AgentCredentials
 		existingModels = base.Models
+		existingReasoningEfforts = base.ReasoningEfforts
 	}
 	endpoint, err := r.selectProfileEndpoint(currentEndpoint)
 	if err != nil {
@@ -516,12 +525,17 @@ func (r *runner) collectProfileSelections(cfg *state.Config, base *state.Profile
 	if err != nil {
 		return state.Profile{}, err
 	}
+	reasoningEfforts, err := r.selectReasoningEfforts(agents, credentials, assignments, models, existingReasoningEfforts)
+	if err != nil {
+		return state.Profile{}, err
+	}
 	now := time.Now().UTC()
 	profile := state.Profile{
 		ID:               nextProfileID(name, cfg.Profiles),
 		Name:             name,
 		Endpoint:         endpoint,
 		Models:           models,
+		ReasoningEfforts: reasoningEfforts,
 		Agents:           agents,
 		AgentCredentials: assignments,
 		CreatedAt:        now,
@@ -585,6 +599,9 @@ func activateProfileFields(cfg *state.Config, profile state.Profile) {
 	if cfg.Models == nil {
 		cfg.Models = map[string]string{}
 	}
+	if cfg.ReasoningEfforts == nil {
+		cfg.ReasoningEfforts = map[string]string{}
+	}
 	if cfg.AgentCredentials == nil {
 		cfg.AgentCredentials = map[string]string{}
 	}
@@ -597,6 +614,11 @@ func activateProfileFields(cfg *state.Config, profile state.Profile) {
 	for _, agent := range profile.Agents {
 		cfg.Agents = appendAgentOnce(cfg.Agents, agent)
 		cfg.Models[agent] = profile.Models[agent]
+		if effort := profile.ReasoningEfforts[agent]; effort != "" {
+			cfg.ReasoningEfforts[agent] = effort
+		} else {
+			delete(cfg.ReasoningEfforts, agent)
+		}
 		cfg.AgentCredentials[agent] = profile.AgentCredentials[agent]
 		cfg.AgentEndpoints[agent] = profile.Endpoint
 		cfg.ActiveProfiles[agent] = profile.ID
@@ -655,10 +677,18 @@ func syncActiveProfilesFromCurrent(cfg *state.Config) {
 		if profile.Models == nil {
 			profile.Models = map[string]string{}
 		}
+		if profile.ReasoningEfforts == nil {
+			profile.ReasoningEfforts = map[string]string{}
+		}
 		if profile.AgentCredentials == nil {
 			profile.AgentCredentials = map[string]string{}
 		}
 		profile.Models[agent] = cfg.Models[agent]
+		if effort := cfg.ReasoningEfforts[agent]; effort != "" {
+			profile.ReasoningEfforts[agent] = effort
+		} else {
+			delete(profile.ReasoningEfforts, agent)
+		}
 		profile.AgentCredentials[agent] = cfg.AgentCredentials[agent]
 		profile.UpdatedAt = now
 		setProfileDefaultModel(profile)
@@ -684,7 +714,7 @@ func (r *runner) applyProfile(cfg *state.Config, profile state.Profile) (configu
 		binaryPath, _ = os.Executable()
 	}
 	result, err := configurator.Apply(r.store, configurator.Options{
-		Endpoint: profile.Endpoint, APIKeys: apiKeys, Models: profile.Models,
+		Endpoint: profile.Endpoint, APIKeys: apiKeys, Models: profile.Models, ReasoningEfforts: profile.ReasoningEfforts,
 		Agents: profile.Agents, BinaryPath: binaryPath,
 	})
 	if err != nil {
@@ -797,7 +827,7 @@ func (r *runner) selectProfile(cfg state.Config, prompt string, allowCurrent boo
 
 func profileAlreadyApplied(cfg state.Config, profile state.Profile) bool {
 	for _, agent := range profile.Agents {
-		if cfg.ActiveProfiles[agent] != profile.ID || cfg.Models[agent] != profile.Models[agent] ||
+		if cfg.ActiveProfiles[agent] != profile.ID || cfg.Models[agent] != profile.Models[agent] || cfg.ReasoningEfforts[agent] != profile.ReasoningEfforts[agent] ||
 			cfg.AgentCredentials[agent] != profile.AgentCredentials[agent] || cfg.AgentEndpoints[agent] != profile.Endpoint {
 			return false
 		}
@@ -905,31 +935,83 @@ func (r *runner) manageProfilesInteractive() error {
 		return err
 	}
 	ensureProfileState(&cfg)
-	r.printProfiles(cfg)
-	r.line(r.out, "\n  1. 重命名配置方案\n  2. 删除配置方案\n  0. 返回", "\n  1. Rename profile\n  2. Delete profile\n  0. Back")
-	choice, err := r.askLocalized("请选择: ", "Select an option: ")
-	if err != nil && !errors.Is(err, io.EOF) {
-		return err
+	agents := toolConfigurationAgents(cfg)
+	if len(agents) == 0 {
+		return errors.New(r.text("尚未保存任何 AI 工具配置", "No AI tool configuration has been saved yet"))
 	}
-	switch strings.TrimSpace(choice) {
-	case "", "0":
-		return nil
-	case "1":
-		profile, ok, selectErr := r.selectProfile(cfg, r.text("选择要重命名的方案，输入 0 返回: ", "Select a profile to rename, or enter 0 to go back: "), false)
-		if selectErr != nil || !ok {
-			return selectErr
+	r.line(r.out, "\n管理 AI 工具配置", "\nManage AI tool configurations")
+	for index, agent := range agents {
+		profiles := profilesForAgent(cfg.Profiles, agent)
+		activeName := r.text("未启用", "Not active")
+		if profile, ok := profileByID(cfg.Profiles, cfg.ActiveProfiles[agent]); ok {
+			activeName = profile.Name
 		}
+		r.format(r.out, "  %d. %-16s %d 个方案 · 当前 %s\n", "  %d. %-16s %d configuration(s) · Current: %s\n", index+1, agentLabel(agent), len(profiles), activeName)
+	}
+	toolChoice, askErr := r.askLocalized("选择工具，输入 0 返回: ", "Choose a tool, or enter 0 to go back: ")
+	if askErr != nil && !errors.Is(askErr, io.EOF) {
+		return askErr
+	}
+	toolChoice = strings.TrimSpace(toolChoice)
+	if toolChoice == "" || toolChoice == "0" {
+		return nil
+	}
+	toolNumber, convErr := strconv.Atoi(toolChoice)
+	if convErr != nil || toolNumber < 1 || toolNumber > len(agents) {
+		return errors.New(r.text("工具编号无效", "Invalid tool number"))
+	}
+	agent := agents[toolNumber-1]
+	profiles := profilesForAgent(cfg.Profiles, agent)
+	if len(profiles) == 0 {
+		return fmt.Errorf(r.text("%s 尚未保存配置方案", "%s has no saved configuration"), agentLabel(agent))
+	}
+
+	r.format(r.out, "\n%s 配置方案\n", "\n%s configurations\n", agentLabel(agent))
+	for index, profile := range profiles {
+		marker := " "
+		if cfg.ActiveProfiles[agent] == profile.ID {
+			marker = "✓"
+		}
+		credentialName := configCredentialName(cfg, profile.AgentCredentials[agent])
+		fmt.Fprintf(r.out, "  %d. %s %s · %s · %s\n", index+1, marker, profile.Name, credentialName, profile.Models[agent])
+	}
+	r.line(r.out, "\n  1. 重命名方案\n  2. 删除方案\n  0. 返回", "\n  1. Rename a configuration\n  2. Delete a configuration\n  0. Back")
+	action, actionErr := r.askLocalized("请选择: ", "Select an option: ")
+	if actionErr != nil && !errors.Is(actionErr, io.EOF) {
+		return actionErr
+	}
+	action = strings.TrimSpace(action)
+	if action == "" || action == "0" {
+		return nil
+	}
+	if action != "1" && action != "2" {
+		return errors.New(r.text("请输入菜单中的编号", "Enter a number from the menu"))
+	}
+	profileChoice, profileErr := r.askLocalized("选择方案，输入 0 返回: ", "Choose a configuration, or enter 0 to go back: ")
+	if profileErr != nil && !errors.Is(profileErr, io.EOF) {
+		return profileErr
+	}
+	profileChoice = strings.TrimSpace(profileChoice)
+	if profileChoice == "" || profileChoice == "0" {
+		return nil
+	}
+	profileNumber, profileConvErr := strconv.Atoi(profileChoice)
+	if profileConvErr != nil || profileNumber < 1 || profileNumber > len(profiles) {
+		return errors.New(r.text("配置方案编号无效", "Invalid configuration number"))
+	}
+	profile := profiles[profileNumber-1]
+	if action == "1" {
 		for {
-			answer, askErr := r.ask(fmt.Sprintf(r.text("新名称 [%s]: ", "New name [%s]: "), profile.Name))
-			if askErr != nil && !errors.Is(askErr, io.EOF) {
-				return askErr
+			answer, renameErr := r.ask(fmt.Sprintf(r.text("新名称 [%s]: ", "New name [%s]: "), profile.Name))
+			if renameErr != nil && !errors.Is(renameErr, io.EOF) {
+				return renameErr
 			}
 			if strings.TrimSpace(answer) == "" {
 				return nil
 			}
 			name, nameErr := validateProfileName(answer)
-			if nameErr != nil || profileNameExists(cfg.Profiles, name, profile.ID) {
-				r.line(r.errOut, "  名称无效或已存在，请重新输入。", "  The name is invalid or already exists; try again.")
+			if nameErr != nil || (profileNameExistsForAgent(cfg.Profiles, agent, name) && !strings.EqualFold(name, profile.Name)) {
+				r.line(r.errOut, "  名称无效，或此工具已有同名方案，请重新输入。", "  The name is invalid or already used by this tool; try again.")
 				continue
 			}
 			index := profileIndexByID(cfg.Profiles, profile.ID)
@@ -938,35 +1020,25 @@ func (r *runner) manageProfilesInteractive() error {
 			if err := r.store.SaveConfig(cfg); err != nil {
 				return err
 			}
-			r.format(r.out, "✓ 已重命名为 %s。\n", "✓ Renamed to %s.\n", name)
+			r.format(r.out, "✓ %s 的方案已重命名为 %s。\n", "✓ %s configuration renamed to %s.\n", agentLabel(agent), name)
 			return nil
 		}
-	case "2":
-		if len(cfg.Profiles) == 1 {
-			return errors.New(r.text("至少保留一个配置方案", "At least one profile must remain"))
-		}
-		profile, ok, selectErr := r.selectProfile(cfg, r.text("选择要删除的方案，输入 0 返回: ", "Select a profile to delete, or enter 0 to go back: "), false)
-		if selectErr != nil || !ok {
-			return selectErr
-		}
-		if profileIsActive(cfg, profile.ID) {
-			return fmt.Errorf(r.text("配置方案 %s 正在使用，请先切换后再删除", "Profile %s is in use; switch away from it before deleting"), profile.Name)
-		}
-		answer, askErr := r.ask(fmt.Sprintf(r.text("确认删除 %s？[y/N]: ", "Delete %s? [y/N]: "), profile.Name))
-		if askErr != nil && !errors.Is(askErr, io.EOF) {
-			return askErr
-		}
-		if !yes(answer) {
-			return nil
-		}
-		index := profileIndexByID(cfg.Profiles, profile.ID)
-		cfg.Profiles = append(cfg.Profiles[:index], cfg.Profiles[index+1:]...)
-		if err := r.store.SaveConfig(cfg); err != nil {
-			return err
-		}
-		r.format(r.out, "✓ 已删除配置方案 %s。\n", "✓ Deleted profile %s.\n", profile.Name)
-		return nil
-	default:
-		return errors.New(r.text("请输入菜单中的编号", "Enter a number from the menu"))
 	}
+	if profileIsActive(cfg, profile.ID) {
+		return fmt.Errorf(r.text("配置方案 %s 正在使用，请先切换对应工具后再删除", "Configuration %s is still active for a tool; switch that tool first, then delete it"), profile.Name)
+	}
+	answer, confirmErr := r.ask(fmt.Sprintf(r.text("确认删除 %s 的方案 %s？[y/N]: ", "Delete %s configuration %s? [y/N]: "), agentLabel(agent), profile.Name))
+	if confirmErr != nil && !errors.Is(confirmErr, io.EOF) {
+		return confirmErr
+	}
+	if !yes(answer) {
+		return nil
+	}
+	index := profileIndexByID(cfg.Profiles, profile.ID)
+	cfg.Profiles = append(cfg.Profiles[:index], cfg.Profiles[index+1:]...)
+	if err := r.store.SaveConfig(cfg); err != nil {
+		return err
+	}
+	r.format(r.out, "✓ 已删除 %s 的方案 %s。\n", "✓ Deleted %s configuration %s.\n", agentLabel(agent), profile.Name)
+	return nil
 }

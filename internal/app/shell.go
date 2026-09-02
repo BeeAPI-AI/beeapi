@@ -42,25 +42,19 @@ func (r *runner) home() error {
 				return err
 			}
 		}
-		r.printHomeStatus(cfg, r.homeBalanceLabel(cfg))
+		fmt.Fprintln(r.out, "\n────────────────────────────────────────")
+		r.format(r.out, "  账户余额  %s\n", "  Account balance  %s\n", r.homeBalanceLabel(cfg))
+		fmt.Fprintln(r.out, "────────────────────────────────────────")
 		r.line(r.out, `
-  1. 快速切换配置方案
-  2. 添加 AI 工具 / 新建配置方案
-  3. 编辑配置方案
-  4. 管理配置方案
-  5. 密钥与余额
-  6. 启动已配置的 AI 工具
-  7. 重新连接 BeeAPI / 更新密钥
-  8. 更多设置
+  1. 配置 AI 工具
+  2. 查看当前 AI 工具配置
+  3. 启动已配置的 AI 工具
+  4. 设置
   0. 退出`, `
-  1. Quick-switch profile
-  2. Add AI tools / create profile
-  3. Edit profile
-  4. Manage profiles
-  5. API Keys and balance
-  6. Launch a configured AI tool
-  7. Reconnect BeeAPI / update API Keys
-  8. More settings
+  1. Configure an AI tool
+  2. View current AI tool configurations
+  3. Launch a configured AI tool
+  4. Settings
   0. Exit`)
 		choice, askErr := r.askLocalized("\n请选择: ", "\nSelect an option: ")
 		if errors.Is(askErr, io.EOF) && strings.TrimSpace(choice) == "" {
@@ -78,21 +72,12 @@ func (r *runner) home() error {
 		pauseAfter := true
 		switch normalizedChoice {
 		case "1":
-			actionErr = r.switchProfileInteractive()
+			actionErr = r.configureToolInteractive()
 		case "2":
-			actionErr = r.createProfileInteractive()
+			actionErr = r.currentToolConfigurationsInteractive()
 		case "3":
-			actionErr = r.editProfileInteractive()
-		case "4":
-			actionErr = r.manageProfilesInteractive()
-		case "5":
-			actionErr = r.balanceMenu()
-			pauseAfter = false
-		case "6":
 			actionErr = r.launchMenu(cfg)
-		case "7":
-			actionErr = r.reconnect()
-		case "8":
+		case "4":
 			actionErr = r.moreMenu()
 			pauseAfter = false
 		case "0", "q", "quit", "exit":
@@ -117,23 +102,27 @@ func (r *runner) moreMenu() error {
 	for {
 		r.redrawInteractiveScreen()
 		r.line(r.out, `
-更多设置
-  1. 网络入口与 Cloudflare 优选
-  2. 检查本机工具环境
-  3. 恢复配置备份
-  4. 界面语言
-  5. 检查并安装 CLI 更新
-  6. 断开 OAuth 账户（保留本机 Key）
-  7. 重新运行首次设置
+设置
+  1. BeeAPI 账户、密钥与余额
+  2. 管理配置方案
+  3. 重新连接 BeeAPI 账户
+  4. 网络入口与 Cloudflare 优选
+  5. 检查本机工具环境
+  6. 恢复配置备份
+  7. 界面语言
+  8. 检查并安装 CLI 更新
+  9. 断开 OAuth 账户（保留本机 Key）
   0. 返回`, `
-More settings
-  1. Network endpoints and Cloudflare IP selection
-  2. Check local tool environment
-  3. Restore a configuration backup
-  4. Interface language
-  5. Check and install a CLI update
-  6. Disconnect OAuth account (keep local Keys)
-  7. Run first-time setup again
+Settings
+  1. BeeAPI account, API Keys, and balance
+  2. Manage configurations
+  3. Reconnect BeeAPI account
+  4. Network endpoints and Cloudflare IP selection
+  5. Check local tool environment
+  6. Restore a configuration backup
+  7. Interface language
+  8. Check and install a CLI update
+  9. Disconnect OAuth account (keep local Keys)
   0. Back`)
 		choice, err := r.askLocalized("请选择: ", "Select an option: ")
 		if err != nil && !errors.Is(err, io.EOF) {
@@ -148,29 +137,29 @@ More settings
 		pauseAfter := true
 		switch choice {
 		case "1":
-			actionErr = r.networkMenu()
+			actionErr = r.balanceMenu()
 			pauseAfter = false
 		case "2":
-			actionErr = r.detect()
+			actionErr = r.manageProfilesInteractive()
 		case "3":
-			actionErr = r.rollbackMenu()
+			actionErr = r.reconnect()
 		case "4":
-			actionErr = r.languageMenu()
+			actionErr = r.networkMenu()
+			pauseAfter = false
 		case "5":
-			actionErr = r.updateCLI(nil)
+			actionErr = r.detect()
 		case "6":
+			actionErr = r.rollbackMenu()
+		case "7":
+			actionErr = r.languageMenu()
+		case "8":
+			actionErr = r.updateCLI(nil)
+		case "9":
 			answer, confirmErr := r.askLocalized("  撤销账户连接但保留已保存 Key 与工具配置，继续？[y/N]: ", "  Revoke the account connection but keep saved Keys and tool configuration. Continue? [y/N]: ")
 			if confirmErr != nil && !errors.Is(confirmErr, io.EOF) {
 				actionErr = confirmErr
 			} else if yes(answer) {
 				actionErr = r.disconnectOAuthAccount()
-			}
-		case "7":
-			answer, confirmErr := r.askLocalized("  将重新选择网络入口、凭据和工具，继续？[y/N]: ", "  This will reselect the endpoint, credentials, and tools. Continue? [y/N]: ")
-			if confirmErr != nil && !errors.Is(confirmErr, io.EOF) {
-				actionErr = confirmErr
-			} else if yes(answer) {
-				actionErr = r.setupWithRecovery(nil)
 			}
 		default:
 			actionErr = errors.New(r.text("请输入菜单中的编号", "Enter a number from the menu"))
@@ -344,7 +333,7 @@ func (r *runner) configureInteractive() error {
 		binaryPath, _ = os.Executable()
 	}
 	result, err := configurator.Apply(r.store, configurator.Options{
-		Endpoint: cfg.Endpoint, APIKeys: apiKeys, Models: selectedModels,
+		Endpoint: cfg.Endpoint, APIKeys: apiKeys, Models: selectedModels, ReasoningEfforts: cfg.ReasoningEfforts,
 		Agents: agents, BinaryPath: binaryPath,
 	})
 	if err != nil {
@@ -389,7 +378,7 @@ func (r *runner) reconfigureCurrentAgents(cfg *state.Config, endpoint string) (s
 		cfg.BinaryPath, _ = os.Executable()
 	}
 	result, err := configurator.Apply(r.store, configurator.Options{
-		Endpoint: endpoint, APIKeys: apiKeys, Models: selectedModels,
+		Endpoint: endpoint, APIKeys: apiKeys, Models: selectedModels, ReasoningEfforts: cfg.ReasoningEfforts,
 		Agents: cfg.Agents, BinaryPath: cfg.BinaryPath,
 	})
 	if err != nil {
@@ -419,14 +408,7 @@ func (r *runner) reconnect() error {
 		return err
 	}
 	ensureProfileState(&cfg)
-	pending, resumePending, err := r.pendingSetupForMode(pendingModeReconnect, false)
-	if err != nil {
-		return err
-	}
 	endpoint := cfg.Endpoint
-	if resumePending {
-		endpoint = pending.Endpoint
-	}
 	if endpoint != "" {
 		probe := beeapi.ProbeEndpoints(r.ctx, []beeapi.Endpoint{{Name: "当前入口", BaseURL: endpoint}})
 		if len(probe) == 1 && probe[0].Reachable {
@@ -449,86 +431,31 @@ func (r *runner) reconnect() error {
 		}
 	}
 
-	r.line(r.out, "\n重新连接 BeeAPI · 获取新的密钥配置", "\nReconnect BeeAPI · Load updated API Key configurations")
-	var credentials []credentialMaterial
-	var storedCredentials []state.Credential
-	if resumePending {
-		credentials, err = r.restorePendingCredentialMaterials(pending)
-		if err != nil {
-			return err
-		}
-		storedCredentials = pending.Credentials
-		r.format(r.out, "  ✓ 已恢复上次授权保存的 %d 个 API Key。\n", "  ✓ Restored %d API Key(s) saved by the previous authorization.\n", len(credentials))
-		r.updatePendingSetup(pendingModeReconnect, endpoint, storedCredentials, nil)
-	} else {
-		var authorized authorizationResult
-		authorized, err = r.authorize(endpoint, false, pendingModeReconnect)
-		if err != nil {
-			return err
-		}
-		credentials = authorized.Credentials
-		storedCredentials = authorized.Stored
-		if len(storedCredentials) == 0 {
-			storedCredentials, err = r.checkpointCredentialMaterials(pendingModeReconnect, endpoint, credentials)
-			if err != nil {
-				return err
-			}
-		}
-	}
-	credentials, err = r.discoverCredentialModels(endpoint, credentials)
+	r.line(r.out, "\n重新连接 BeeAPI 账户", "\nReconnect your BeeAPI account")
+	connected, err := r.connectOAuthAccountOnly(endpoint, false, false)
 	if err != nil {
-		r.updatePendingSetup(pendingModeReconnect, endpoint, storedCredentials, err)
 		return err
 	}
 	cfg.Endpoint = endpoint
-	cfg.Credentials = mergeStoredCredentials(cfg, storedCredentials)
-	cfg.KeyName = credentialSummaryName(cfg.Credentials, r.language)
-	cfg.CredentialBackend = ""
-	if len(cfg.Agents) == 0 && len(credentials) > 0 && len(credentials[0].Models) > 0 {
-		cfg.DefaultModel = credentials[0].Models[0]
+	if cfg.InitializedAt.IsZero() {
+		cfg.InitializedAt = time.Now().UTC()
+	}
+	if len(connected.Credentials) > 0 {
+		stored, saveErr := r.saveCredentialMaterials(connected.Credentials)
+		if saveErr != nil {
+			return saveErr
+		}
+		cfg.Credentials = mergeStoredCredentials(cfg, stored)
+		cfg.KeyName = credentialSummaryName(cfg.Credentials, r.language)
+		cfg.CredentialBackend = ""
 	}
 	if err := r.store.SaveConfig(cfg); err != nil {
-		r.updatePendingSetup(pendingModeReconnect, endpoint, storedCredentials, err)
 		return err
 	}
-	if err := r.store.ClearPendingSetup(); err != nil {
-		r.format(r.errOut, "  警告：清理设置续接点失败：%v\n", "  Warning: could not clear the setup checkpoint: %v\n", err)
-	}
 	r.clearUsageCache()
-	r.format(r.out, "\n✓ 已连接 BeeAPI · %s\n", "\n✓ Connected to BeeAPI · %s\n", endpoint)
-	r.format(r.out, "  新领取的 Key 已与本机配置合并；共保存 %d 个密钥配置。\n", "  Newly exported Keys were merged with local configuration; %d API Key configuration(s) are saved.\n", len(cfg.Credentials))
-	r.line(r.out, "\n接下来要做什么？", "\nWhat would you like to do next?")
-	r.line(r.out, "  1. 选择任意工具并新建配置方案（推荐）", "  1. Choose any tools and create a profile (recommended)")
-	if len(cfg.Agents) > 0 {
-		r.line(r.out, "  2. 重新选择当前全部工具的 Key 与模型", "  2. Reselect API Keys and models for all currently configured tools")
-		r.line(r.out, "  3. 仅保存新 Key，返回主菜单", "  3. Save the new Keys only and return to the main menu")
-	} else {
-		r.line(r.out, "  2. 仅保存新 Key，返回主菜单", "  2. Save the new Keys only and return to the main menu")
-	}
-	choice, askErr := r.askLocalized("请选择 [1]: ", "Select [1]: ")
-	if askErr != nil && !errors.Is(askErr, io.EOF) {
-		return askErr
-	}
-	switch strings.TrimSpace(choice) {
-	case "", "1":
-		r.redrawInteractiveScreen()
-		return r.createProfileInteractive()
-	case "2":
-		if len(cfg.Agents) == 0 {
-			return nil
-		}
-		backupID, updateErr := r.reconfigureCurrentAgents(&cfg, endpoint)
-		if updateErr != nil {
-			return updateErr
-		}
-		r.format(r.out, "\n✓ 已更新当前全部工具；备份 %s\n", "\n✓ Updated all currently configured tools; backup %s\n", backupID)
-		return nil
-	case "3":
-		if len(cfg.Agents) > 0 {
-			return nil
-		}
-	}
-	return errors.New(r.text("请输入菜单中的编号", "Enter a number from the menu"))
+	r.format(r.out, "\n✓ BeeAPI 账户连接已保存 · %s\n", "\n✓ BeeAPI account connection saved · %s\n", endpoint)
+	r.line(r.out, "  配置工具时会实时读取可用 Key；只有你选中的一枚才会保存到本机。", "  Available Keys are loaded during tool setup; only the one you select is saved locally.")
+	return nil
 }
 
 func (r *runner) modelsForCredential(endpoint, secret string) (credentialModelDiscovery, error) {

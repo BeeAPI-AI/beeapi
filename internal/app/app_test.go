@@ -276,7 +276,7 @@ func TestRunWithoutArgumentsOpensHomeAfterInitialSetup(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := output.String()
-	for _, want := range []string{"____", "BeeAPI CLI v0-test", "当前方案  默认配置", "快速切换配置方案", "密钥与余额", "启动已配置的 AI 工具", "已退出 BeeAPI CLI"} {
+	for _, want := range []string{"____", "BeeAPI CLI v0-test", "账户余额", "配置 AI 工具", "查看当前 AI 工具配置", "启动已配置的 AI 工具", "设置", "已退出 BeeAPI CLI"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("returning-user shell is missing %q:\n%s", want, text)
 		}
@@ -353,7 +353,7 @@ func TestFirstRunEnglishLanguageChoiceIsPersistedBeforeSetup(t *testing.T) {
 		t.Fatalf("English setup should stop on the intentionally empty fallback key, got %v", err)
 	}
 	text := output.String()
-	for _, want := range []string{"Choose your language / 选择语言", "First-time setup", "[1/3] Check official BeeAPI endpoints", "[2/3] Connect BeeAPI"} {
+	for _, want := range []string{"Choose your language / 选择语言", "First-time setup", "[1/3] Check official BeeAPI endpoints", "[2/3] Connect your BeeAPI account"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("English first-run guide is missing %q:\n%s", want, text)
 		}
@@ -385,7 +385,7 @@ func TestSavedEnglishLanguageOpensEnglishHomeWithoutPrompt(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := output.String()
-	for _, want := range []string{"Profile", "Quick-switch profile", "API Keys and balance", "Exited BeeAPI CLI"} {
+	for _, want := range []string{"Account balance", "Configure an AI tool", "View current AI tool configurations", "Settings", "Exited BeeAPI CLI"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("English home is missing %q:\n%s", want, text)
 		}
@@ -533,13 +533,13 @@ func TestTokenPrintUsesCredentialAssignedToAgent(t *testing.T) {
 	}
 }
 
-func TestMultiCredentialAssignmentKeepsSharedClaudeConfigurationTogether(t *testing.T) {
-	input := strings.NewReader("2\n\n")
+func TestMultiCredentialAssignmentKeepsClaudeCodeAndDesktopIndependent(t *testing.T) {
+	input := strings.NewReader("1\n\n\n")
 	var output bytes.Buffer
 	r := &runner{in: input, reader: bufio.NewReader(input), out: &output, errOut: &output}
 	credentials := []credentialMaterial{
 		{ID: "one", Name: "general", Prefix: "sk-one", Models: []string{"gpt-5"}},
-		{ID: "two", Name: "coding", Prefix: "sk-two", Models: []string{"claude-sonnet"}},
+		{ID: "two", Name: "coding", Prefix: "sk-two", Models: []string{"claude-sonnet-4-6"}},
 	}
 	assignments, err := r.selectCredentialAssignments(
 		[]string{"claude", "claude-desktop", "codex"}, credentials, nil, false,
@@ -547,11 +547,11 @@ func TestMultiCredentialAssignmentKeepsSharedClaudeConfigurationTogether(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if assignments["claude"] != "two" || assignments["claude-desktop"] != "two" || assignments["codex"] != "one" {
+	if assignments["claude"] != "one" || assignments["claude-desktop"] != "two" || assignments["codex"] != "one" {
 		t.Fatalf("unexpected assignments: %#v", assignments)
 	}
-	if !strings.Contains(output.String(), "共享本地配置") {
-		t.Fatalf("shared configuration notice missing:\n%s", output.String())
+	if strings.Contains(output.String(), "共享本地配置") || !strings.Contains(output.String(), "Claude Desktop · 选择 API Key") {
+		t.Fatalf("Claude Code and Desktop were not handled independently:\n%s", output.String())
 	}
 }
 

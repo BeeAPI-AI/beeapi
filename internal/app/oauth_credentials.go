@@ -22,14 +22,14 @@ type oauthKeyChoice struct {
 	Err     error
 }
 
-func (r *runner) authorizeWithExistingOAuth(existing state.OAuthAccount, endpoint string, noOpen bool, mode string) (authorizationResult, error) {
+func (r *runner) authorizeWithExistingOAuth(existing state.OAuthAccount, endpoint string, noOpen bool, mode string, agents ...string) (authorizationResult, error) {
 	selectedIssuer, err := beeapi.OAuthIssuerForEntrance(endpoint)
 	if err != nil {
 		return authorizationResult{}, err
 	}
 	if existing.Issuer != selectedIssuer {
 		r.line(r.out, "  当前入口属于另一 OAuth 安全域，正在重新授权。", "  The current endpoint belongs to another OAuth security domain; authorizing again.")
-		return r.authorizeAndSelectOAuthCredentials(endpoint, noOpen, mode)
+		return r.authorizeAndSelectOAuthCredentials(endpoint, noOpen, mode, agents...)
 	}
 	identity := strings.TrimSpace(existing.Username)
 	if identity == "" {
@@ -50,7 +50,7 @@ func (r *runner) authorizeWithExistingOAuth(existing state.OAuthAccount, endpoin
 	case "", "1":
 		client, account, sessionErr := r.oauthAccountClient(r.ctx)
 		if sessionErr == nil && containsScope(account.Scope, "api_keys:export") {
-			result, selectErr := r.selectAndExportOAuthCredentials(client, account, endpoint, mode)
+			result, selectErr := r.selectAndExportOAuthCredentials(client, account, endpoint, mode, agents...)
 			if selectErr == nil || !oauthInteractiveAuthorizationRequired(selectErr) {
 				return result, selectErr
 			}
@@ -61,9 +61,9 @@ func (r *runner) authorizeWithExistingOAuth(existing state.OAuthAccount, endpoin
 		} else {
 			r.line(r.out, "  持续登录令牌不保留 Key 导出权限，需要在网页重新确认。", "  Persistent sign-in does not retain API Key export permission; browser approval is required again.")
 		}
-		return r.authorizeAndSelectOAuthCredentials(endpoint, noOpen, mode)
+		return r.authorizeAndSelectOAuthCredentials(endpoint, noOpen, mode, agents...)
 	case "2":
-		return r.authorizeAndSelectOAuthCredentials(endpoint, noOpen, mode)
+		return r.authorizeAndSelectOAuthCredentials(endpoint, noOpen, mode, agents...)
 	case "3":
 		credentials, pasteErr := r.pasteAPIKey(endpoint)
 		if pasteErr == nil {
@@ -75,12 +75,12 @@ func (r *runner) authorizeWithExistingOAuth(existing state.OAuthAccount, endpoin
 	}
 }
 
-func (r *runner) authorizeAndSelectOAuthCredentials(endpoint string, noOpen bool, mode string) (authorizationResult, error) {
+func (r *runner) authorizeAndSelectOAuthCredentials(endpoint string, noOpen bool, mode string, agents ...string) (authorizationResult, error) {
 	client, _, account, err := r.authorizeOAuthAccount(endpoint, noOpen)
 	if err != nil {
 		return authorizationResult{}, err
 	}
-	return r.selectAndExportOAuthCredentials(client, account, endpoint, mode)
+	return r.selectAndExportOAuthCredentials(client, account, endpoint, mode, agents...)
 }
 
 func oauthInteractiveAuthorizationRequired(err error) bool {
@@ -107,7 +107,7 @@ func oauthCapabilityUnavailable(err error) bool {
 	}
 }
 
-func (r *runner) selectAndExportOAuthCredentials(client *beeapi.Client, account state.OAuthAccount, endpoint, mode string) (authorizationResult, error) {
+func (r *runner) selectAndExportOAuthCredentials(client *beeapi.Client, account state.OAuthAccount, endpoint, mode string, agents ...string) (authorizationResult, error) {
 	if client == nil {
 		return authorizationResult{}, errors.New(r.text("OAuth 账户客户端未初始化", "The OAuth account client is not initialized"))
 	}
@@ -149,7 +149,12 @@ func (r *runner) selectAndExportOAuthCredentials(client *beeapi.Client, account 
 	}
 
 	choices := r.loadOAuthKeyChoices(client, keys)
-	selected, err := r.selectOAuthKeyChoices(choices)
+	var selected []oauthKeyChoice
+	if len(agents) == 1 && strings.TrimSpace(agents[0]) != "" {
+		selected, err = r.selectOAuthKeyChoiceForAgent(choices, agents[0])
+	} else {
+		selected, err = r.selectOAuthKeyChoices(choices)
+	}
 	if err != nil {
 		return authorizationResult{}, err
 	}
@@ -389,6 +394,63 @@ func (r *runner) selectOAuthKeyChoices(choices []oauthKeyChoice) ([]oauthKeyChoi
 			continue
 		}
 		return selected, nil
+	}
+}
+
+func (r *runner) selectOAuthKeyChoiceForAgent(choices []oauthKeyChoice, agent string) ([]oauthKeyChoice, error) {
+	r.line(r.out, "\n  选择要用于本机配置的 BeeAPI API Key", "\n  Choose the BeeAPI API Key for this configuration")
+	selectable := make([]int, 0, len(choices))
+	for index, choice := range choices {
+		name := strings.TrimSpace(choice.Key.Name)
+		if name == "" {
+			name = r.text("未命名 API Key", "Unnamed API Key")
+		}
+		prefix := strings.TrimSpace(choice.Key.KeyPrefix)
+		if prefix == "" {
+			prefix = r.text("前缀未知", "Unknown prefix")
+		}
+		if !oauthKeySelectableMetadata(choice.Key) {
+			reason := strings.TrimSpace(choice.Key.UnavailableReason)
+			if reason == "" {
+				reason = strings.TrimSpace(choice.Key.Status)
+			}
+			fmt.Fprintf(r.out, "    × %s · %s · %s\n", name, prefix, r.credentialSkipReason(reason))
+			continue
+		}
+		if choice.Err != nil {
+			r.format(r.out, "    × %s · %s · 无法读取模型：%v\n", "    × %s · %s · Could not load models: %v\n", name, prefix, choice.Err)
+			continue
+		}
+		credential := credentialMaterial{
+			Name: name, Models: choice.Models, ModelOptions: choice.Options, ModelOptionsAuthoritative: true,
+		}
+		compatible, compatibilityErr := compatibleModelsForAgent(agent, credential)
+		if compatibilityErr != nil {
+			r.format(r.out, "    × %s · %s · 不适用于 %s：%s\n", "    × %s · %s · Not compatible with %s: %s\n",
+				name, prefix, agentLabel(agent), r.localizedErrorMessage(compatibilityErr))
+			continue
+		}
+		selectable = append(selectable, index)
+		fmt.Fprintf(r.out, "    %d. ✓ %s · %s · %d %s\n", len(selectable), name, prefix, len(compatible), r.text("个兼容模型", "compatible model(s)"))
+	}
+	if len(selectable) == 0 {
+		return nil, fmt.Errorf(r.text("没有可用于 %s 的 API Key，请在 BeeAPI 检查 Key 路由与模型权限", "No API Key is compatible with %s; check its routing and model access in BeeAPI"), agentLabel(agent))
+	}
+	for {
+		answer, err := r.askLocalized("  输入编号（回车=1）: ", "  Enter one number (Enter=1): ")
+		if err != nil && !errors.Is(err, io.EOF) {
+			return nil, err
+		}
+		answer = strings.TrimSpace(answer)
+		if answer == "" {
+			answer = "1"
+		}
+		number, convErr := strconv.Atoi(answer)
+		if convErr != nil || number < 1 || number > len(selectable) {
+			r.line(r.errOut, "  API Key 编号无效，请重新选择。", "  Invalid API Key number; choose again.")
+			continue
+		}
+		return []oauthKeyChoice{choices[selectable[number-1]]}, nil
 	}
 }
 

@@ -253,6 +253,49 @@ func TestOAuthKeySelectionRetriesInvalidInputInPlace(t *testing.T) {
 	}
 }
 
+func TestOAuthKeySelectionForToolShowsOnlyCompatibleKeysAndSelectsOne(t *testing.T) {
+	input := strings.NewReader("2\n")
+	var output bytes.Buffer
+	r := &runner{
+		ctx: context.Background(), in: input, reader: bufio.NewReader(input),
+		out: &output, errOut: &output,
+	}
+	choices := []oauthKeyChoice{
+		{
+			Key:    beeapi.OAuthAPIKey{ID: "chat", Name: "Chat only", KeyPrefix: "sk-chat", Exportable: true},
+			Models: []string{"chat-model"}, Options: []beeapi.ModelOption{{
+				ID: "chat-model", Protocols: []string{"openai/chat_completions"}, RecommendedFor: []string{"openai_compatible"}, Priority: 100,
+			}},
+		},
+		{
+			Key:    beeapi.OAuthAPIKey{ID: "codex-a", Name: "Codex A", KeyPrefix: "sk-a", Exportable: true},
+			Models: []string{"gpt-a"}, Options: []beeapi.ModelOption{{
+				ID: "gpt-a", Protocols: []string{"openai/responses"}, RecommendedFor: []string{"codex"}, Priority: 100,
+			}},
+		},
+		{
+			Key:    beeapi.OAuthAPIKey{ID: "codex-b", Name: "Codex B", KeyPrefix: "sk-b", Exportable: true},
+			Models: []string{"gpt-b"}, Options: []beeapi.ModelOption{{
+				ID: "gpt-b", Protocols: []string{"openai/responses"}, RecommendedFor: []string{"codex"}, Priority: 90,
+			}},
+		},
+	}
+	selected, err := r.selectOAuthKeyChoiceForAgent(choices, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(selected) != 1 || selected[0].Key.ID != "codex-b" {
+		t.Fatalf("unexpected single-tool Key selection: %#v", selected)
+	}
+	text := output.String()
+	if !strings.Contains(text, "Chat only") || !strings.Contains(text, "不适用于 Codex") {
+		t.Fatalf("incompatible Key was not explained:\n%s", text)
+	}
+	if strings.Contains(text, "可逗号多选") {
+		t.Fatalf("single-tool flow still offered multi-select:\n%s", text)
+	}
+}
+
 func TestAuthorizeReusesConnectedOAuthSessionAndRecoversLostExportResponse(t *testing.T) {
 	t.Setenv("GETBEE_DISABLE_KEYRING", "1")
 	store := &state.Store{Dir: t.TempDir()}

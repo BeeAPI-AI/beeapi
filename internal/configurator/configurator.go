@@ -14,6 +14,11 @@ import (
 	"github.com/BeeAPI-AI/beeapi/internal/state"
 )
 
+const (
+	claudeDesktopProfileID = "00000000-0000-4000-8000-000000157210"
+	GeminiBeeAPIAlias      = "getbeeapi"
+)
+
 var SupportedAgents = []string{
 	"claude",
 	"claude-desktop",
@@ -26,13 +31,14 @@ var SupportedAgents = []string{
 }
 
 type Options struct {
-	Endpoint   string
-	APIKey     string
-	APIKeys    map[string]string
-	Model      string
-	Models     map[string]string
-	Agents     []string
-	BinaryPath string
+	Endpoint         string
+	APIKey           string
+	APIKeys          map[string]string
+	Model            string
+	Models           map[string]string
+	ReasoningEfforts map[string]string
+	Agents           []string
+	BinaryPath       string
 }
 
 type Result struct {
@@ -60,17 +66,32 @@ func Apply(store *state.Store, options Options) (Result, error) {
 		return Result{}, err
 	}
 
-	// Claude Code and Claude Desktop deliberately share ~/.claude/settings.json.
-	// Refuse ambiguous assignments instead of allowing the last writer to win.
 	shared := map[string]struct{ key, model string }{}
 	for _, agent := range agents {
 		key := apiKeyForAgent(options, agent)
 		model := modelForAgent(options, agent)
+		reasoningEffort := reasoningEffortForAgent(options, agent)
 		if key == "" {
 			return Result{}, fmt.Errorf("没有为 %s 选择 API Key", agent)
 		}
 		if model == "" {
 			return Result{}, fmt.Errorf("没有为 %s 选择模型", agent)
+		}
+		if agent == "claude-desktop" {
+			if runtime.GOOS != "windows" && runtime.GOOS != "darwin" {
+				return Result{}, errors.New("Claude Desktop 3P 配置目前仅支持 Windows 和 macOS；Linux 请配置 Claude Code")
+			}
+			if !validClaudeDesktopModel(model) {
+				return Result{}, fmt.Errorf("Claude Desktop 直连模式仅支持 claude-sonnet-*、claude-opus-* 或 claude-haiku-* 模型，当前模型 %q 不兼容", model)
+			}
+		}
+		if reasoningEffort != "" {
+			if !agentSupportsReasoningEffort(agent) {
+				return Result{}, fmt.Errorf("%s 不支持由 GetBeeAPI 写入思考等级", agent)
+			}
+			if !validReasoningEffort(agent, reasoningEffort) {
+				return Result{}, fmt.Errorf("%s 思考等级 %q 无效", agent, reasoningEffort)
+			}
 		}
 		path := pathForAgent(home, agent)
 		if previous, ok := shared[path]; ok && (previous.key != key || previous.model != model) {
@@ -123,7 +144,7 @@ func appendHint(result *Result, agent string) {
 	case "claude":
 		result.Hints = append(result.Hints, "Claude Code: claude")
 	case "claude-desktop":
-		result.Hints = append(result.Hints, "Claude Desktop: 直接打开 Code 标签页")
+		result.Hints = append(result.Hints, "Claude Desktop: 已切换到独立 3P 配置，完全退出并重新打开后生效")
 	case "codex":
 		result.Hints = append(result.Hints, "Codex: codex")
 	case "gemini":
@@ -217,8 +238,10 @@ func hermesDir(home string) string {
 
 func pathsForAgent(home, agent string) []string {
 	switch agent {
-	case "claude", "claude-desktop":
+	case "claude":
 		return []string{filepath.Join(home, ".claude", "settings.json")}
+	case "claude-desktop":
+		return claudeDesktopPaths(home, runtime.GOOS)
 	case "codex":
 		return []string{filepath.Join(home, ".codex", "config.toml")}
 	case "gemini":
@@ -240,6 +263,35 @@ func pathsForAgent(home, agent string) []string {
 	}
 }
 
+func claudeDesktopPaths(home, goos string) []string {
+	var appRoot, thirdPartyRoot string
+	switch goos {
+	case "darwin":
+		applicationSupport := filepath.Join(home, "Library", "Application Support")
+		appRoot = filepath.Join(applicationSupport, "Claude")
+		thirdPartyRoot = filepath.Join(applicationSupport, "Claude-3p")
+	case "windows":
+		localAppData := strings.TrimSpace(os.Getenv("LOCALAPPDATA"))
+		if localAppData == "" {
+			localAppData = filepath.Join(home, "AppData", "Local")
+		}
+		appRoot = filepath.Join(localAppData, "Claude")
+		thirdPartyRoot = filepath.Join(localAppData, "Claude-3p")
+	default:
+		// The caller rejects Linux writes. Returning isolated paths keeps path
+		// discovery deterministic without ever treating Claude Code as Desktop.
+		appRoot = filepath.Join(home, ".config", "Claude")
+		thirdPartyRoot = filepath.Join(home, ".config", "Claude-3p")
+	}
+	configLibrary := filepath.Join(thirdPartyRoot, "configLibrary")
+	return []string{
+		filepath.Join(appRoot, "claude_desktop_config.json"),
+		filepath.Join(thirdPartyRoot, "claude_desktop_config.json"),
+		filepath.Join(configLibrary, "_meta.json"),
+		filepath.Join(configLibrary, claudeDesktopProfileID+".json"),
+	}
+}
+
 func pathForAgent(home, agent string) string {
 	return pathsForAgent(home, agent)[0]
 }
@@ -249,8 +301,8 @@ func writeAgent(home, agent string, options Options) ([]string, error) {
 	apiKey := apiKeyForAgent(options, agent)
 	paths := pathsForAgent(home, agent)
 	switch agent {
-	case "claude", "claude-desktop":
-		err := mergeJSON(paths[0], map[string]any{
+	case "claude":
+		patch := map[string]any{
 			"env": map[string]any{
 				"ANTHROPIC_AUTH_TOKEN":           apiKey,
 				"ANTHROPIC_BASE_URL":             options.Endpoint + "/anthropic",
@@ -259,18 +311,33 @@ func writeAgent(home, agent string, options Options) ([]string, error) {
 				"ANTHROPIC_DEFAULT_SONNET_MODEL": model,
 				"ANTHROPIC_DEFAULT_OPUS_MODEL":   model,
 			},
-		})
+		}
+		managed := []jsonPathPatch{{Path: []string{"effortLevel"}, Remove: true}}
+		if effort := reasoningEffortForAgent(options, agent); effort != "" {
+			managed[0] = jsonPathPatch{Path: []string{"effortLevel"}, Value: effort}
+		}
+		err := mergeJSONPaths(paths[0], patch, managed)
 		return paths[:1], err
+	case "claude-desktop":
+		if err := writeClaudeDesktop(paths, options.Endpoint, apiKey, model); err != nil {
+			return nil, err
+		}
+		return paths, nil
 	case "codex":
 		binary := strings.TrimSpace(options.BinaryPath)
 		if binary == "" {
 			binary = "beeapi"
 		}
+		topFields := []tomlFieldPatch{
+			setTOMLField("model_provider", strconv.Quote("beeapi")),
+			setTOMLField("model", strconv.Quote(model)),
+			removeTOMLField("model_reasoning_effort"),
+		}
+		if effort := reasoningEffortForAgent(options, agent); effort != "" {
+			topFields[2] = setTOMLField("model_reasoning_effort", strconv.Quote(effort))
+		}
 		err := patchTOMLFile(paths[0],
-			[]tomlFieldPatch{
-				setTOMLField("model_provider", strconv.Quote("beeapi")),
-				setTOMLField("model", strconv.Quote(model)),
-			},
+			topFields,
 			[]tomlSectionPatch{
 				{Name: "model_providers.beeapi", Fields: []tomlFieldPatch{
 					setTOMLField("name", strconv.Quote("BeeAPI")),
@@ -290,35 +357,62 @@ func writeAgent(home, agent string, options Options) ([]string, error) {
 			})
 		return paths[:1], err
 	case "gemini":
+		geminiModel := model
+		managed := []jsonPathPatch{{Path: []string{"modelConfigs", "customAliases", GeminiBeeAPIAlias}, Remove: true}}
+		if effort := reasoningEffortForAgent(options, agent); effort != "" {
+			geminiModel = GeminiBeeAPIAlias
+			managed[0] = jsonPathPatch{Path: []string{"modelConfigs", "customAliases", GeminiBeeAPIAlias}, Value: map[string]any{
+				"modelConfig": map[string]any{
+					"model": model,
+					"generateContentConfig": map[string]any{
+						"thinkingConfig": geminiThinkingConfig(model, effort),
+					},
+				},
+			}}
+		}
 		if err := patchEnvFile(paths[0], []envFieldPatch{
 			{Key: "GOOGLE_GEMINI_BASE_URL", Value: options.Endpoint},
 			{Key: "GEMINI_API_KEY", Value: apiKey},
-			{Key: "GEMINI_MODEL", Value: model},
+			{Key: "GEMINI_MODEL", Value: geminiModel},
 		}); err != nil {
 			return nil, err
 		}
-		if err := mergeJSON(paths[1], map[string]any{
+		if err := mergeJSONPaths(paths[1], map[string]any{
 			"security": map[string]any{"auth": map[string]any{"selectedType": "gemini-api-key"}},
-		}); err != nil {
+		}, managed); err != nil {
 			return nil, err
 		}
 		return paths, nil
 	case "grok":
+		modelFields := []tomlFieldPatch{
+			setTOMLField("model", strconv.Quote(model)),
+			setTOMLField("base_url", strconv.Quote(options.Endpoint+"/v1")),
+			setTOMLField("name", strconv.Quote("BeeAPI · "+model)),
+			setTOMLField("api_key", strconv.Quote(apiKey)),
+			removeTOMLField("env_key"),
+			removeTOMLField("auth_provider"),
+			setTOMLField("api_backend", strconv.Quote("responses")),
+			removeTOMLField("reasoning_effort"),
+			removeTOMLField("supports_reasoning_effort"),
+			removeTOMLField("reasoning_efforts"),
+		}
+		if effort := reasoningEffortForAgent(options, agent); effort != "" {
+			modelFields[7] = setTOMLField("reasoning_effort", strconv.Quote(effort))
+			modelFields[8] = setTOMLField("supports_reasoning_effort", "true")
+			modelFields[9] = setTOMLField("reasoning_efforts", `["low", "medium", "high", "xhigh"]`)
+		}
 		err := patchTOMLFile(paths[0], nil, []tomlSectionPatch{
-			{Name: "model.beeapi", Fields: []tomlFieldPatch{
-				setTOMLField("model", strconv.Quote(model)),
-				setTOMLField("base_url", strconv.Quote(options.Endpoint+"/v1")),
-				setTOMLField("name", strconv.Quote("BeeAPI · "+model)),
-				setTOMLField("api_key", strconv.Quote(apiKey)),
-				removeTOMLField("env_key"),
-				removeTOMLField("auth_provider"),
-				setTOMLField("api_backend", strconv.Quote("responses")),
-			}},
+			{Name: "model.beeapi", Fields: modelFields},
 			{Name: "models", Fields: []tomlFieldPatch{setTOMLField("default", strconv.Quote("beeapi"))}},
 		})
 		return paths[:1], err
 	case "opencode":
-		err := mergeJSON(paths[0], map[string]any{
+		modelConfig := map[string]any{"name": model}
+		if effort := reasoningEffortForAgent(options, agent); effort != "" {
+			modelConfig["reasoning"] = true
+			modelConfig["options"] = map[string]any{"reasoningEffort": effort}
+		}
+		err := mergeJSONPaths(paths[0], map[string]any{
 			"$schema": "https://opencode.ai/config.json",
 			"model":   "beeapi/" + model,
 			"provider": map[string]any{
@@ -329,13 +423,21 @@ func writeAgent(home, agent string, options Options) ([]string, error) {
 						"baseURL": options.Endpoint + "/v1",
 						"apiKey":  apiKey,
 					},
-					"models": map[string]any{model: map[string]any{"name": model}},
 				},
 			},
-		})
+		}, []jsonPathPatch{{Path: []string{"provider", "beeapi", "models", model}, Value: modelConfig}})
 		return paths[:1], err
 	case "openclaw":
-		err := mergeJSON(paths[0], map[string]any{
+		modelConfig := map[string]any{"id": model, "name": model}
+		managed := []jsonPathPatch{{Path: []string{"agents", "defaults", "thinkingDefault"}, Remove: true}}
+		if effort := reasoningEffortForAgent(options, agent); effort != "" {
+			managed[0] = jsonPathPatch{Path: []string{"agents", "defaults", "thinkingDefault"}, Value: effort}
+			modelConfig["reasoning"] = true
+			modelConfig["compat"] = map[string]any{
+				"supportedReasoningEfforts": []any{"minimal", "low", "medium", "high", "xhigh"},
+			}
+		}
+		err := mergeJSONPaths(paths[0], map[string]any{
 			"agents": map[string]any{"defaults": map[string]any{"model": map[string]any{"primary": "beeapi/" + model}}},
 			"models": map[string]any{
 				"mode": "merge",
@@ -344,11 +446,11 @@ func writeAgent(home, agent string, options Options) ([]string, error) {
 						"baseUrl": options.Endpoint + "/v1",
 						"apiKey":  apiKey,
 						"api":     "openai-responses",
-						"models":  []any{map[string]any{"id": model, "name": model}},
+						"models":  []any{modelConfig},
 					},
 				},
 			},
-		})
+		}, managed)
 		return paths[:1], err
 	case "hermes":
 		if err := patchYAMLMappingFile(paths[0], "model", []yamlFieldPatch{
@@ -356,6 +458,13 @@ func writeAgent(home, agent string, options Options) ([]string, error) {
 			{Key: "provider", Value: strconv.Quote("custom")},
 			{Key: "base_url", Value: strconv.Quote(options.Endpoint + "/v1")},
 		}); err != nil {
+			return nil, err
+		}
+		agentReasoning := yamlFieldPatch{Key: "reasoning_effort", Remove: true}
+		if effort := reasoningEffortForAgent(options, agent); effort != "" {
+			agentReasoning = yamlFieldPatch{Key: "reasoning_effort", Value: strconv.Quote(effort)}
+		}
+		if err := patchYAMLMappingFile(paths[0], "agent", []yamlFieldPatch{agentReasoning}); err != nil {
 			return nil, err
 		}
 		if err := patchEnvFile(paths[1], []envFieldPatch{
@@ -389,7 +498,156 @@ func modelForAgent(options Options, agent string) string {
 	return strings.TrimSpace(options.Model)
 }
 
+func reasoningEffortForAgent(options Options, agent string) string {
+	if options.ReasoningEfforts == nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(options.ReasoningEfforts[agent]))
+}
+
+func reasoningEffortValues(agent string) []string {
+	switch agent {
+	case "claude":
+		return []string{"low", "medium", "high", "xhigh"}
+	case "codex":
+		return []string{"minimal", "low", "medium", "high", "xhigh"}
+	case "gemini":
+		return []string{"minimal", "low", "medium", "high"}
+	case "grok":
+		return []string{"low", "medium", "high", "xhigh"}
+	case "opencode":
+		return []string{"low", "medium", "high"}
+	case "openclaw", "hermes":
+		return []string{"minimal", "low", "medium", "high", "xhigh"}
+	default:
+		return nil
+	}
+}
+
+func agentSupportsReasoningEffort(agent string) bool {
+	return len(reasoningEffortValues(agent)) > 0
+}
+
+func validReasoningEffort(agent, value string) bool {
+	wanted := strings.ToLower(strings.TrimSpace(value))
+	for _, allowed := range reasoningEffortValues(agent) {
+		if wanted == allowed {
+			return true
+		}
+	}
+	return false
+}
+
+func geminiThinkingConfig(model, effort string) map[string]any {
+	model = strings.ToLower(strings.TrimSpace(model))
+	effort = strings.ToLower(strings.TrimSpace(effort))
+	if strings.HasPrefix(model, "gemini-2.5-") {
+		budget := 8192
+		switch effort {
+		case "minimal":
+			if strings.Contains(model, "-pro") {
+				budget = 128
+			} else {
+				budget = 0
+			}
+		case "low":
+			budget = 1024
+		case "high":
+			if strings.Contains(model, "-pro") {
+				budget = 32768
+			} else {
+				budget = 24576
+			}
+		}
+		return map[string]any{"thinkingBudget": budget}
+	}
+	return map[string]any{"thinkingLevel": strings.ToUpper(effort)}
+}
+
+func validClaudeDesktopModel(value string) bool {
+	model := strings.ToLower(strings.TrimSpace(value))
+	model = strings.TrimPrefix(model, "anthropic/")
+	return strings.HasPrefix(model, "claude-sonnet-") || strings.HasPrefix(model, "claude-opus-") || strings.HasPrefix(model, "claude-haiku-")
+}
+
+func writeClaudeDesktop(paths []string, endpoint, apiKey, model string) error {
+	if len(paths) != 4 {
+		return errors.New("Claude Desktop 配置路径不完整")
+	}
+	if err := mergeJSON(paths[0], map[string]any{"deploymentMode": "3p"}); err != nil {
+		return err
+	}
+	if err := mergeJSON(paths[1], map[string]any{"deploymentMode": "3p"}); err != nil {
+		return err
+	}
+	if err := mergeClaudeDesktopMeta(paths[2]); err != nil {
+		return err
+	}
+	return mergeJSON(paths[3], map[string]any{
+		"inferenceProvider":          "gateway",
+		"inferenceGatewayBaseUrl":    strings.TrimRight(endpoint, "/") + "/anthropic",
+		"inferenceGatewayAuthScheme": "bearer",
+		"inferenceGatewayApiKey":     apiKey,
+		"inferenceModels":            []any{model},
+	})
+}
+
+func mergeClaudeDesktopMeta(path string) error {
+	current := map[string]any{}
+	if raw, err := os.ReadFile(path); err == nil {
+		if len(strings.TrimSpace(string(raw))) > 0 {
+			if err := json.Unmarshal(raw, &current); err != nil {
+				return fmt.Errorf("现有 Claude Desktop _meta.json 无法解析: %w", err)
+			}
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	entries := make([]any, 0)
+	if existing, ok := current["entries"]; ok {
+		var valid bool
+		entries, valid = existing.([]any)
+		if !valid {
+			return errors.New("现有 Claude Desktop _meta.json 的 entries 不是数组")
+		}
+	}
+	updated := false
+	for index, entry := range entries {
+		item, ok := entry.(map[string]any)
+		if !ok || item["id"] != claudeDesktopProfileID {
+			continue
+		}
+		item["name"] = "BeeAPI"
+		item["provider"] = "gateway"
+		entries[index] = item
+		updated = true
+		break
+	}
+	if !updated {
+		entries = append(entries, map[string]any{
+			"id": claudeDesktopProfileID, "name": "BeeAPI", "provider": "gateway",
+		})
+	}
+	current["appliedId"] = claudeDesktopProfileID
+	current["entries"] = entries
+	raw, err := json.MarshalIndent(current, "", "  ")
+	if err != nil {
+		return err
+	}
+	return secureWrite(path, append(raw, '\n'))
+}
+
+type jsonPathPatch struct {
+	Path   []string
+	Value  any
+	Remove bool
+}
+
 func mergeJSON(path string, patch map[string]any) error {
+	return mergeJSONPaths(path, patch, nil)
+}
+
+func mergeJSONPaths(path string, patch map[string]any, managed []jsonPathPatch) error {
 	current := map[string]any{}
 	if b, err := os.ReadFile(path); err == nil {
 		if len(strings.TrimSpace(string(b))) > 0 {
@@ -401,11 +659,46 @@ func mergeJSON(path string, patch map[string]any) error {
 		return err
 	}
 	deepMerge(current, patch)
+	for _, item := range managed {
+		if len(item.Path) == 0 {
+			continue
+		}
+		if item.Remove {
+			deleteJSONPath(current, item.Path)
+			continue
+		}
+		setJSONPath(current, item.Path, item.Value)
+	}
 	b, err := json.MarshalIndent(current, "", "  ")
 	if err != nil {
 		return err
 	}
 	return secureWrite(path, append(b, '\n'))
+}
+
+func setJSONPath(root map[string]any, path []string, value any) {
+	current := root
+	for _, key := range path[:len(path)-1] {
+		next, ok := current[key].(map[string]any)
+		if !ok {
+			next = map[string]any{}
+			current[key] = next
+		}
+		current = next
+	}
+	current[path[len(path)-1]] = value
+}
+
+func deleteJSONPath(root map[string]any, path []string) {
+	current := root
+	for _, key := range path[:len(path)-1] {
+		next, ok := current[key].(map[string]any)
+		if !ok {
+			return
+		}
+		current = next
+	}
+	delete(current, path[len(path)-1])
 }
 
 func secureWrite(path string, data []byte) error {

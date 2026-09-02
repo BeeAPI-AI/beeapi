@@ -231,6 +231,16 @@ func TestSaveConfigPersistsNamedProfilesWithoutSecrets(t *testing.T) {
 	}
 }
 
+func TestOAuthOnlyConnectionCountsAsInitialized(t *testing.T) {
+	cfg := Config{Endpoint: "https://beeapi.dev", InitializedAt: time.Now().UTC()}
+	if !cfg.Initialized() {
+		t.Fatal("OAuth-only first-time setup was treated as incomplete")
+	}
+	if (Config{Endpoint: "https://beeapi.dev"}).Initialized() {
+		t.Fatal("an endpoint without setup completion or credentials was treated as initialized")
+	}
+}
+
 func TestDeleteNamedCredentialRemovesProtectedFallback(t *testing.T) {
 	t.Setenv("GETBEE_DISABLE_KEYRING", "1")
 	store := &Store{Dir: t.TempDir()}

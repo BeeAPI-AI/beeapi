@@ -77,8 +77,8 @@ func (r *runner) localizedHint(message string) string {
 		id := strings.TrimSuffix(strings.TrimPrefix(message, "仅更新 BeeAPI 连接字段；原配置已完整备份，可用 beeapi rollback "), " 恢复")
 		return "Only BeeAPI connection fields were updated; the original configuration was fully backed up. Restore it with beeapi rollback " + id
 	}
-	if message == "Claude Desktop: 直接打开 Code 标签页" {
-		return "Claude Desktop: open the Code tab directly"
+	if message == "Claude Desktop: 已切换到独立 3P 配置，完全退出并重新打开后生效" {
+		return "Claude Desktop: switched to its separate 3P configuration; fully quit and reopen the app"
 	}
 	return message
 }

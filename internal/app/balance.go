@@ -203,9 +203,12 @@ func (r *runner) balanceMenu() error {
 	if err != nil {
 		return err
 	}
-	credentials, err := r.loadCredentialMaterials(cfg, false)
-	if err != nil {
-		return err
+	var credentials []credentialMaterial
+	if len(cfg.Credentials) > 0 || strings.TrimSpace(cfg.CredentialBackend) != "" {
+		credentials, err = r.loadCredentialMaterials(cfg, false)
+		if err != nil {
+			return err
+		}
 	}
 	r.line(r.out, "\n密钥与余额", "\nAPI Keys and balance")
 	oauthBalance, oauthBalanceErr := r.queryOAuthAccountBalance(true)
@@ -231,6 +234,9 @@ func (r *runner) balanceMenu() error {
 				break
 			}
 		}
+	}
+	if oauthBalanceErr != nil && len(credentials) == 0 {
+		r.format(r.out, "  账户余额  暂时无法读取：%s\n", "  Account balance  Temporarily unavailable: %s\n", r.localizedErrorMessage(oauthBalanceErr))
 	}
 	for index, result := range results {
 		prefix := strings.TrimSpace(result.credential.Prefix)

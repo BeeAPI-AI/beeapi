@@ -25,14 +25,14 @@ test("exports the GetBeeAPI product page for static hosting", async () => {
   assert.match(html, /OAuth 连接 BeeAPI 账户/);
   assert.match(html, /同意并继续/);
   assert.match(html, /直接粘贴 API Key/);
-  assert.match(html, /授权后先在终端查看 Key 与模型/);
+  assert.match(html, /账户连接与工具 Key 选择分开/);
   assert.match(html, /不会创建新 Key/);
   assert.match(html, /SSH 终端始终显示完整授权网址与设备码/);
   assert.match(html, /账户 Token 采用 DPoP 绑定/);
   assert.match(html, /令牌交换与 Key 导出响应中断时复用原请求恢复/);
   assert.match(html, /选择性导出采用短期、幂等、保存后 ACK 的一次性交付/);
   assert.match(html, /能保存并切换多套配置/);
-  assert.match(html, /账户余额与每个 Key 的可用状态/);
+  assert.match(html, /每个工具独立保存多套方案/);
   assert.doesNotMatch(html, /设备专用 Key/);
   for (const tool of [
     "Claude Code",
@@ -47,7 +47,7 @@ test("exports the GetBeeAPI product page for static hosting", async () => {
     assert.match(html, new RegExp(tool));
   }
   assert.match(html, /当前版本 · 8 项适配/);
-  assert.match(html, /普通 Claude 聊天仍使用 Anthropic 账户模型/);
+  assert.match(html, /Windows\/macOS 支持原生 3P gateway 直连/);
 
   const ordered = ["选择可用入口", "连接 BeeAPI", "配置本地工具"];
   let previous = -1;

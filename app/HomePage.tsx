@@ -37,26 +37,26 @@ const phases = [
     key: "AUTH",
     title: localized("连接 BeeAPI", "Connect BeeAPI"),
     description: localized(
-      "在 BeeAPI 官方页面完成 OAuth 授权。CLI 先读取账户余额、Key 元数据与模型能力；你在终端选中 Key 后，才会一次性领取并安全保存。",
-      "Authorize on BeeAPI's official site. The CLI reads account balance, Key metadata, and model capabilities first, then exports only the Key you choose and stores it safely.",
+      "在 BeeAPI 官方页面完成 OAuth 授权。首次连接只保存账户会话并读取余额，不会提前领取或创建 API Key。",
+      "Authorize on BeeAPI's official site. The first connection stores only the account session and reads the balance; it does not export or create an API Key yet.",
     ),
-    note: localized("OAuth → 查看 Key / 模型 → 选择后领取", "OAuth → inspect Keys/models → export selection"),
+    note: localized("OAuth → 保存账户 → 进入主页", "OAuth → save account → open dashboard"),
   },
   {
     number: "03",
     key: "APPLY",
     title: localized("配置本地工具", "Configure local tools"),
     description: localized(
-      "识别已有 CLI 和配置文件，多选目标工具，为每个工具选择密钥与模型；给这组选择起名，统一备份后写入，任一步失败都可恢复整个批次。",
-      "Detect installed CLIs and config files, choose tools, assign a Key and model to each, name the profile, then back up and apply the batch with full recovery on failure.",
+      "一次选择一个工具，再选择一枚兼容的 BeeAPI Key、模型和工具专属参数。每个工具可保存多套独立方案并随时切换。",
+      "Choose one tool, one compatible BeeAPI Key, a model, and tool-specific options. Each tool can keep and switch among its own configurations.",
     ),
-    note: localized("detect → key → model → named profile", "detect → key → model → named profile"),
+    note: localized("tool → key → model → named config", "tool → key → model → named config"),
   },
 ];
 
 const agents = [
   { name: "Claude Code", key: "CLAUDE", kind: localized("编码 CLI", "Coding CLI"), icon: "/tool-icons/claude.svg", detail: localized("合并现有 settings.json，保留权限与工具设置。", "Merges settings.json while preserving permissions and tool settings.") },
-  { name: "Claude Desktop", key: "DESKTOP", kind: localized("Code 模式", "Code mode"), icon: "/tool-icons/claude.svg", detail: localized("与 Claude Code 共享配置，并可从 CLI 直接打开 Code。", "Shares Claude Code configuration and can open Code directly from the CLI.") },
+  { name: "Claude Desktop", key: "DESKTOP", kind: localized("桌面应用", "Desktop app"), icon: "/tool-icons/claude.svg", detail: localized("Windows/macOS 写入独立 3P 配置，不修改 Claude Code。", "Uses a separate 3P configuration on Windows/macOS without changing Claude Code.") },
   { name: "Codex", key: "CODEX", kind: localized("编码 CLI", "Coding CLI"), icon: "/tool-icons/codex.svg", detail: localized("只更新默认配置的 BeeAPI provider，不改 ChatGPT 登录与 MCP。", "Updates only the BeeAPI provider in the default profile, leaving ChatGPT login and MCP untouched.") },
   { name: "Gemini CLI", key: "GEMINI", kind: localized("编码 CLI", "Coding CLI"), icon: "/tool-icons/gemini.svg", detail: localized("只更新原生 .env 连接变量与鉴权选择。", "Updates only native .env connection variables and authentication selection.") },
   { name: "Grok Build", key: "GROK", kind: localized("编码 CLI", "Coding CLI"), icon: "/tool-icons/grok.svg", detail: localized("在默认配置中增加 BeeAPI model，保留 UI 与 MCP。", "Adds a BeeAPI model to the default config while preserving UI and MCP settings.") },
@@ -96,11 +96,11 @@ const faqs = [
   },
   {
     question: localized("能保存并切换多套配置吗？", "Can I save and switch multiple configurations?"),
-    answer: localized("可以。输入 beeapi 后只需给方案起名并按编号选择工具、Key 与模型；切换时先备份，再只更新 BeeAPI 管理字段。主页还会显示账户余额与每个 Key 的可用状态。", "Yes. Run beeapi, name a profile, then choose tools, Keys, and models by number. Switching creates a backup and changes only BeeAPI-managed fields. The home screen also shows balance and each Key's availability."),
+    answer: localized("可以。每个工具独立保存多套方案，每套方案绑定自己的 BeeAPI Key、模型和专属参数。切换 Codex 不会改动 Grok Build、Gemini CLI 或其他工具。", "Yes. Every tool keeps its own configurations, each bound to its own BeeAPI Key, model, and tool-specific options. Switching Codex does not change Grok Build, Gemini CLI, or another tool."),
   },
   {
-    question: localized("Claude Desktop 的普通聊天也会切换到 BeeAPI 吗？", "Does regular Claude Desktop chat switch to BeeAPI?"),
-    answer: localized("不会。GetBeeAPI 配置的是 Claude Desktop 中与 Claude Code 共用设置的 Code 模式；普通 Claude 聊天不支持替换底层模型入口。", "No. GetBeeAPI configures Claude Desktop's Code mode, which shares Claude Code settings. Regular Claude chat does not support replacing its model endpoint."),
+    question: localized("Claude Desktop 和 Claude Code 会互相覆盖吗？", "Do Claude Desktop and Claude Code overwrite each other?"),
+    answer: localized("不会。两者使用独立适配器。Claude Desktop 仅在 Windows/macOS 写入自己的 3P gateway 配置，并只开放可直连的 Claude 模型；Linux 暂不写入 Desktop 配置。", "No. They use separate adapters. On Windows/macOS, Claude Desktop writes its own 3P gateway configuration and exposes only directly compatible Claude models. Desktop configuration is not written on Linux yet."),
   },
 ];
 
@@ -267,7 +267,7 @@ export default function HomePage() {
         </div>
 
         <p className="hero-hint">
-          {text("首次输入 ", "Run ")}<code>beeapi</code>{text(" 完成三步设置；以后输入即可切换方案、查看余额与 Key 状态，也可用 ", " for a three-step setup. Run it again to switch profiles, inspect balance and Key status, or use ")}<code>beeapi update</code>{text(" 安全更新。", " for verified updates.")}
+          {text("首次输入 ", "Run ")}<code>beeapi</code>{text(" 完成连接；以后输入即可按工具配置或切换 Key 与模型、查看余额，也可用 ", " once to connect. Run it again to configure or switch Keys and models per tool, inspect balance, or use ")}<code>beeapi update</code>{text(" 安全更新。", " for verified updates.")}
         </p>
 
         <div className="hero-toolrail" aria-label={text("GetBeeAPI 支持的工具", "Tools supported by GetBeeAPI")}>
@@ -338,15 +338,15 @@ export default function HomePage() {
 
           <div className="tool-scope-note">
             <span className="tool-scope-icon">i</span>
-            <p><strong>{text("关于 Claude Desktop", "About Claude Desktop")}</strong>{text("适配范围是其中的 Code 模式，它与 Claude Code 共享设置；普通 Claude 聊天仍使用 Anthropic 账户模型。", "The integration covers Code mode, which shares Claude Code settings. Regular Claude chat continues to use Anthropic account models.")}</p>
-            <code>CLAUDE DESKTOP · CODE</code>
+            <p><strong>{text("关于 Claude Desktop", "About Claude Desktop")}</strong>{text("它与 Claude Code 使用独立配置。Windows/macOS 支持原生 3P gateway 直连；切换后完全退出并重开 Desktop 生效。", "It is configured independently from Claude Code. Windows/macOS support native direct 3P gateway mode; fully quit and reopen Desktop after switching.")}</p>
+            <code>CLAUDE DESKTOP · 3P</code>
           </div>
 
           <div className="config-flow" aria-label={text("配置写入流程", "Configuration flow")}>
             <span>{text("环境扫描", "Scan")}</span><i />
-            <span>{text("多选工具", "Choose tools")}</span><i />
-            <span>{text("分配密钥与模型", "Assign Keys and models")}</span><i />
-            <span>{text("统一备份", "Back up")}</span><i />
+            <span>{text("选择一个工具", "Choose one tool")}</span><i />
+            <span>{text("选择 Key 与模型", "Choose Key and model")}</span><i />
+            <span>{text("独立备份", "Back up tool")}</span><i />
             <span>{text("写入验证", "Apply and verify")}</span>
           </div>
         </div>
@@ -374,7 +374,7 @@ export default function HomePage() {
         <div className="section-heading centered-heading">
           <p className="section-kicker">HOW IT WORKS</p>
           <h2>{text("从 BeeAPI 密钥配置，到工具里的可用模型。", "From BeeAPI Keys to working models in your tools.")}</h2>
-          <p>{text("首次运行只有三步：可用入口、BeeAPI 连接、工具与模型配置。完成后再次输入 beeapi，会直接进入可切换方案、查看余额与管理 Key 状态的日常主页。", "First run takes three steps: choose an endpoint, connect BeeAPI, then configure tools and models. After setup, beeapi opens a daily dashboard for switching profiles, checking balance, and managing Key status.")}</p>
+          <p>{text("首次运行只负责可用入口与 BeeAPI 账户连接。完成后再次输入 beeapi，会进入四项主页；工具、Key、模型和多套方案都按工具独立配置。", "First run only chooses an endpoint and connects the BeeAPI account. After that, beeapi opens a four-item dashboard where tools, Keys, models, and saved configurations are managed independently per tool.")}</p>
         </div>
         <ol className="workflow-list">
           {phases.map((phase) => (
@@ -389,14 +389,14 @@ export default function HomePage() {
       <section className="content-section shell" id="auth">
         <div className="section-heading split-heading">
           <div><p className="section-kicker">AUTHORIZATION</p><h2>{text("用熟悉的方式，", "A familiar way to")}<br />{text("连接 BeeAPI。", "connect BeeAPI.")}</h2></div>
-          <p>{text("推荐通过 BeeAPI OAuth 连接账户：网页只负责登录并确认权限，CLI 先读取余额、Key 名称与模型能力；只有你在终端选中 Key 后，才会一次性领取。不会创建新 Key，也可以直接粘贴单个 Key 回退。", "Connect through BeeAPI OAuth: the web page handles login and consent, while the CLI reads balance, Key names, and model capabilities. It exports only the Key you select, creates no new Key, and supports direct paste as a fallback.")}</p>
+          <p>{text("推荐通过 BeeAPI OAuth 连接账户：首次只保存账户会话并读取余额。以后配置某个工具时，再查看兼容 Key 与模型；只有你在终端选中 Key 后，才会一次性领取。不会创建新 Key，也可以直接粘贴单个 Key 回退。", "Connect through BeeAPI OAuth: the first authorization stores the account session and reads the balance. Later, while configuring one tool, the CLI lists compatible Keys and models and exports only your terminal selection. It creates no new Key and supports direct paste as a fallback.")}</p>
         </div>
 
         <div className="auth-grid">
           <article className="choice-card recommended">
             <div className="choice-top"><span className="choice-number">01</span><span className="recommended-pill"><i />{text("推荐", "Recommended")}</span></div>
             <h3>{text("OAuth 连接 BeeAPI 账户", "Connect your BeeAPI account with OAuth")}</h3>
-            <p>{text("桌面端使用浏览器 + PKCE 回到本机，SSH 使用设备码并始终显示完整网址。授权后先在终端查看 Key 与模型，选择哪一个，才领取哪一个。", "Desktop uses browser + PKCE with a loopback callback. SSH uses the Device Flow and always prints the full URL. Inspect Keys and models in the terminal, then export only your selection.")}</p>
+            <p>{text("桌面端使用浏览器 + PKCE 回到本机，SSH 使用设备码并始终显示完整网址。账户连接与工具 Key 选择分开；配置工具时选择哪一个，才领取哪一个。", "Desktop uses browser + PKCE with a loopback callback. SSH uses the Device Flow and always prints the full URL. Account connection is separate from tool Key selection; only the Key selected during tool setup is exported.")}</p>
             <div className="browser-preview" aria-label={text("BeeAPI 网页授权界面示意", "BeeAPI authorization preview")}>
               <div className="browser-preview-bar"><span><i />beeapi.dev/oauth/authorize</span><b>{text("官方域名", "Official domain")}</b></div>
               <div className="approval-preview">

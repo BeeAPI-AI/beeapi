@@ -253,8 +253,9 @@ func dotenvAssignmentKey(line string) (string, bool) {
 }
 
 type yamlFieldPatch struct {
-	Key   string
-	Value string
+	Key    string
+	Value  string
+	Remove bool
 }
 
 func patchYAMLMappingFile(path, section string, patches []yamlFieldPatch) error {
@@ -280,7 +281,9 @@ func patchYAMLMappingFile(path, section string, patches []yamlFieldPatch) error 
 		}
 		lines = append(lines, section+":")
 		for _, patch := range patches {
-			lines = append(lines, "  "+patch.Key+": "+patch.Value)
+			if !patch.Remove {
+				lines = append(lines, "  "+patch.Key+": "+patch.Value)
+			}
 		}
 		return secureWrite(path, []byte(joinTextLines(lines, newline, true)))
 	}
@@ -329,10 +332,12 @@ func patchYAMLMappingFile(path, section string, patches []yamlFieldPatch) error 
 			continue
 		}
 		seen[key] = true
-		body = append(body, indent+patch.Key+": "+patch.Value)
+		if !patch.Remove {
+			body = append(body, indent+patch.Key+": "+patch.Value)
+		}
 	}
 	for _, patch := range patches {
-		if !seen[patch.Key] {
+		if !seen[patch.Key] && !patch.Remove {
 			body = append(body, indent+patch.Key+": "+patch.Value)
 		}
 	}
