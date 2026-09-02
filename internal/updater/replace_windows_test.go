@@ -42,7 +42,7 @@ func TestScheduledWindowsReplacementRetriesWhileTargetIsLocked(t *testing.T) {
 	if err := locked.Start(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := scheduleWindowsReplacement(staging, target, -1); err != nil {
+	if _, err := scheduleWindowsReplacement(staging, target, 0); err != nil {
 		_ = locked.Process.Kill()
 		t.Fatal(err)
 	}

@@ -21,13 +21,20 @@ func scheduleWindowsReplacement(staging, target string, parentPID int) (bool, er
 	// The old executable can remain locked briefly after the parent exits, and
 	// antivirus scanners or an immediately restarted CLI can extend that window.
 	// Keep retrying instead of reporting success before a single best-effort move.
-	script := `param([string]$Source,[string]$Target,[int]$BeeParent); ` +
-		`Wait-Process -Id $BeeParent -ErrorAction SilentlyContinue; ` +
+	script := `$Source=$env:GETBEE_UPDATE_SOURCE; ` +
+		`$Target=$env:GETBEE_UPDATE_TARGET; ` +
+		`$BeeParent=[int]$env:GETBEE_UPDATE_PARENT; ` +
+		`if ($BeeParent -gt 0) { Wait-Process -Id $BeeParent -ErrorAction SilentlyContinue }; ` +
 		`$Deadline=(Get-Date).AddMinutes(10); ` +
 		`do { ` +
 		`try { Move-Item -LiteralPath $Source -Destination $Target -Force -ErrorAction Stop; exit 0 } catch { Start-Sleep -Milliseconds 250 } ` +
 		`} while ((Get-Date) -lt $Deadline); exit 1`
-	command := exec.Command(powershell, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script, staging, target, strconv.Itoa(parentPID))
+	command := exec.Command(powershell, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script)
+	command.Env = append(os.Environ(),
+		"GETBEE_UPDATE_SOURCE="+staging,
+		"GETBEE_UPDATE_TARGET="+target,
+		"GETBEE_UPDATE_PARENT="+strconv.Itoa(parentPID),
+	)
 	if err := command.Start(); err != nil {
 		return false, fmt.Errorf("schedule executable replacement: %w", err)
 	}

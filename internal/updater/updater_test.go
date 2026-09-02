@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -44,6 +45,9 @@ func TestSemanticVersionComparison(t *testing.T) {
 }
 
 func TestInstallDownloadsChecksumVerifiesAndAtomicallyReplaces(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("synchronous replacement is covered by the Windows locked-executable test")
+	}
 	archive := tarGzFixture(t, "beeapi", []byte("new-beeapi-binary"))
 	digest := sha256.Sum256(archive)
 	httpClient := &http.Client{Transport: updaterRoundTripFunc(func(request *http.Request) (*http.Response, error) {
