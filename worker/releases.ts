@@ -2,6 +2,7 @@ export interface ReleaseRoute {
   upstream: string;
   cacheSeconds: number;
   immutable: boolean;
+  latestRedirectFallback?: string;
   fallback?: {
     body: string;
     contentType: string;
@@ -14,6 +15,27 @@ const cfstAssetPattern = "cfst_(?:linux|darwin|windows)_(?:amd64|arm64)\\.(?:tar
 
 const beeapiRelease = new RegExp(`^/releases/(latest|${versionPattern})/download/(${beeapiAssetPattern})$`);
 const cfstRelease = new RegExp(`^/releases/cfst/(${versionPattern})/(${cfstAssetPattern})$`);
+const beeapiLatestRedirect = "https://github.com/BeeAPI-AI/beeapi/releases/latest";
+
+export function parseLatestReleaseTag(location: string): string | null {
+  let target: URL;
+  try {
+    target = new URL(location, "https://github.com");
+  } catch {
+    return null;
+  }
+  const prefix = "/BeeAPI-AI/beeapi/releases/tag/";
+  if (target.protocol !== "https:" || target.hostname !== "github.com" || target.port || target.username || target.password || target.search || target.hash || !target.pathname.startsWith(prefix)) {
+    return null;
+  }
+  let tag: string;
+  try {
+    tag = decodeURIComponent(target.pathname.slice(prefix.length));
+  } catch {
+    return null;
+  }
+  return /^v[0-9]+(?:\.[0-9]+){2}(?:[-+][0-9A-Za-z.-]+)?$/.test(tag) ? tag : null;
+}
 
 // GitHub's unauthenticated Releases API is rate-limited per egress IP. Keep a
 // verified snapshot so first-time installs can still locate CFST when that API
@@ -67,8 +89,9 @@ export function resolveReleaseRoute(url: URL): ReleaseRoute | null {
   if (url.pathname === "/releases/latest.json") {
     return {
       upstream: "https://api.github.com/repos/BeeAPI-AI/beeapi/releases/latest",
-      cacheSeconds: 300,
+      cacheSeconds: 60,
       immutable: false,
+      latestRedirectFallback: beeapiLatestRedirect,
     };
   }
 

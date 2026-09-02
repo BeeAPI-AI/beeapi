@@ -2,7 +2,7 @@
 import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
 import { handleInstallStatsRequest } from "./install-stats";
-import { resolveReleaseRoute } from "./releases";
+import { parseLatestReleaseTag, resolveReleaseRoute } from "./releases";
 
 const releaseResponseHeaders = [
   "content-disposition",
@@ -10,6 +10,7 @@ const releaseResponseHeaders = [
   "etag",
   "last-modified",
 ] as const;
+const releaseCacheGeneration = "2";
 
 type CloudflareImageFormat = "image/avif" | "image/webp" | "image/jpeg" | "image/png" | "image/gif";
 
@@ -41,23 +42,61 @@ async function fetchRelease(request: Request, ctx: WorkerExecutionContext): Prom
     return new Response("Method Not Allowed", { status: 405, headers: { Allow: "GET" } });
   }
 
-  const cacheKey = new Request(request.url, { method: "GET" });
+  // Use a private cache generation so a Worker deploy can immediately bypass
+  // stale responses written by older release-proxy implementations.
+  const cacheURL = new URL(request.url);
+  cacheURL.searchParams.set("__getbeeapi_release_cache", releaseCacheGeneration);
+  const cacheKey = new Request(cacheURL, { method: "GET" });
   const cached = await defaultEdgeCache().match(cacheKey);
   if (cached) return cached;
 
-  const fallbackResponse = (): Response | null => {
-    if (!route.fallback) return null;
-    const response = new Response(route.fallback.body, {
+  const cacheFallback = (response: Response): Response => {
+    ctx.waitUntil(defaultEdgeCache().put(cacheKey, response.clone()));
+    return response;
+  };
+
+  const fallbackResponse = async (): Promise<Response | null> => {
+    if (route.fallback) {
+      return cacheFallback(new Response(route.fallback.body, {
+        status: 200,
+        headers: {
+          "Cache-Control": `public, max-age=${route.cacheSeconds}`,
+          "Content-Type": route.fallback.contentType,
+          "X-Content-Type-Options": "nosniff",
+          "X-GetBeeAPI-Fallback": "static-snapshot",
+        },
+      }));
+    }
+    if (!route.latestRedirectFallback) return null;
+
+    let latest: Response;
+    try {
+      latest = await fetch(route.latestRedirectFallback, {
+        headers: {
+          Accept: "text/html",
+          "User-Agent": "getbeeapi-release-cache/2",
+        },
+        redirect: "manual",
+      });
+    } catch (error) {
+      console.error(JSON.stringify({ event: "release_redirect_fallback_fetch_failed", upstream: route.latestRedirectFallback, error: String(error) }));
+      return null;
+    }
+    const location = latest.headers.get("location") ?? "";
+    if (latest.body) await latest.body.cancel();
+    const tag = [301, 302, 303, 307, 308].includes(latest.status) ? parseLatestReleaseTag(location) : null;
+    if (!tag) {
+      console.error(JSON.stringify({ event: "release_redirect_fallback_invalid", upstream: route.latestRedirectFallback, status: latest.status, location }));
+      return null;
+    }
+    return cacheFallback(Response.json({ tag_name: tag }, {
       status: 200,
       headers: {
         "Cache-Control": `public, max-age=${route.cacheSeconds}`,
-        "Content-Type": route.fallback.contentType,
         "X-Content-Type-Options": "nosniff",
-        "X-GetBeeAPI-Fallback": "1",
+        "X-GetBeeAPI-Fallback": "github-latest-redirect",
       },
-    });
-    ctx.waitUntil(defaultEdgeCache().put(cacheKey, response.clone()));
-    return response;
+    }));
   };
 
   let upstream: Response;
@@ -71,14 +110,15 @@ async function fetchRelease(request: Request, ctx: WorkerExecutionContext): Prom
     });
   } catch (error) {
     console.error(JSON.stringify({ event: "release_proxy_fetch_failed", upstream: route.upstream, error: String(error) }));
-    const fallback = fallbackResponse();
+    const fallback = await fallbackResponse();
     if (fallback) return fallback;
     return new Response("Release upstream unavailable", { status: 502, headers: { "Cache-Control": "no-store" } });
   }
 
   if (!upstream.ok || !upstream.body) {
     console.error(JSON.stringify({ event: "release_proxy_bad_status", upstream: route.upstream, status: upstream.status }));
-    const fallback = fallbackResponse();
+    if (upstream.body) await upstream.body.cancel();
+    const fallback = await fallbackResponse();
     if (fallback) return fallback;
     return new Response("Release upstream error", { status: upstream.status, headers: { "Cache-Control": "no-store" } });
   }

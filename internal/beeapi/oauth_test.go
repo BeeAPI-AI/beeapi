@@ -77,12 +77,73 @@ func TestOAuthMetadataRecognizesAnOfficialSPAFallbackAsUnavailable(t *testing.T)
 	client := New("https://beeapi.dev")
 	client.HTTP = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		return &http.Response{
-			StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"text/html; charset=utf-8"}},
+			StatusCode: http.StatusOK, Header: http.Header{
+				"Content-Type": {"text/html; charset=utf-8"},
+				"X-Request-Id": {"req-spa-123"},
+				"Cf-Ray":       {"ray-spa-456-SIN"},
+			},
 			Body: io.NopCloser(strings.NewReader("<!doctype html><title>BeeAPI</title>")), Request: r,
 		}, nil
 	})}
-	if _, err := client.OAuthMetadata(context.Background()); !errors.Is(err, ErrOAuthDiscoveryUnavailable) {
+	_, err := client.OAuthMetadata(context.Background())
+	if !errors.Is(err, ErrOAuthDiscoveryUnavailable) {
 		t.Fatalf("SPA fallback was not recognized as unavailable discovery: %v", err)
+	}
+	for _, want := range []string{
+		"BeeAPI 返回 200 (oauth.invalid_response)",
+		"GET https://beeapi.dev/.well-known/oauth-authorization-server",
+		"request_id=req-spa-123",
+		"cf_ray=ray-spa-456-SIN",
+		"Content-Type text/html; charset=utf-8",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("discovery error omitted %q: %v", want, err)
+		}
+	}
+}
+
+func TestOAuthMetadataPreservesHTTPDiscoveryFailureDiagnostics(t *testing.T) {
+	client := New(OAuthIssuerDev)
+	client.HTTP = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusServiceUnavailable,
+			Status:     "503 Service Unavailable",
+			Header: http.Header{
+				"Content-Type": {"application/json"},
+				"X-Request-Id": {"req-discovery-123"},
+				"Cf-Ray":       {"ray-discovery-456-SIN"},
+			},
+			Body:    io.NopCloser(strings.NewReader(`{"error":"temporarily_unavailable","error_description":"edge origin unavailable"}`)),
+			Request: r,
+		}, nil
+	})}
+
+	_, err := client.OAuthMetadata(context.Background())
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusServiceUnavailable || apiErr.Reason != "temporarily_unavailable" {
+		t.Fatalf("structured discovery error was not preserved: %#v", err)
+	}
+	for _, want := range []string{
+		"BeeAPI 返回 503 (temporarily_unavailable): edge origin unavailable",
+		"GET https://beeapi.dev/.well-known/oauth-authorization-server",
+		"request_id=req-discovery-123",
+		"cf_ray=ray-discovery-456-SIN",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("discovery error omitted %q: %v", want, err)
+		}
+	}
+}
+
+func TestOAuthMetadataPreservesTransportFailureTarget(t *testing.T) {
+	client := New(OAuthIssuerDev)
+	client.HTTP = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("dial blocked by test network")
+	})}
+
+	_, err := client.OAuthMetadata(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "OAuth discovery GET https://beeapi.dev/.well-known/oauth-authorization-server") || !strings.Contains(err.Error(), "dial blocked by test network") {
+		t.Fatalf("transport failure omitted the discovery target or cause: %v", err)
 	}
 }
 

@@ -71,10 +71,11 @@ func (c *Client) OAuthMetadata(ctx context.Context) (OAuthMetadata, error) {
 		return metadata, err
 	}
 	target := strings.TrimRight(c.BaseURL, "/") + "/.well-known/oauth-authorization-server"
-	if err := c.oauthDiscoveryRequest(ctx, target, expectedIssuer, &metadata); err != nil {
-		var syntaxErr *json.SyntaxError
-		if errors.As(err, &syntaxErr) {
-			return OAuthMetadata{}, fmt.Errorf("%w: endpoint did not return JSON", ErrOAuthDiscoveryUnavailable)
+	resp, err := c.oauthDiscoveryRequest(ctx, target, expectedIssuer, &metadata)
+	if err != nil {
+		var apiErr *APIError
+		if errors.As(err, &apiErr) && apiErr.Reason == "oauth.invalid_response" {
+			return OAuthMetadata{}, fmt.Errorf("%w: %w", ErrOAuthDiscoveryUnavailable, err)
 		}
 		return metadata, err
 	}
@@ -83,7 +84,11 @@ func (c *Client) OAuthMetadata(ctx context.Context) (OAuthMetadata, error) {
 		strings.TrimSpace(metadata.TokenEndpoint) == "" &&
 		strings.TrimSpace(metadata.DeviceAuthorizationEndpoint) == "" &&
 		strings.TrimSpace(metadata.RevocationEndpoint) == "" {
-		return OAuthMetadata{}, fmt.Errorf("%w: metadata is empty", ErrOAuthDiscoveryUnavailable)
+		return OAuthMetadata{}, fmt.Errorf(
+			"%w: %w",
+			ErrOAuthDiscoveryUnavailable,
+			newAPIError(resp, 0, "OAuth metadata document is empty", "oauth.invalid_response"),
+		)
 	}
 	if err := validateOAuthMetadata(c.BaseURL, metadata); err != nil {
 		return OAuthMetadata{}, err
@@ -396,10 +401,10 @@ func (c *Client) oauthFormRequest(ctx context.Context, target string, values url
 	return c.doOAuthRequestNoRedirect(req, out)
 }
 
-func (c *Client) oauthDiscoveryRequest(ctx context.Context, target, expectedIssuer string, out any) error {
+func (c *Client) oauthDiscoveryRequest(ctx context.Context, target, expectedIssuer string, out any) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "beeapi-cli/2")
@@ -411,7 +416,18 @@ func (c *Client) oauthDiscoveryRequest(ctx context.Context, target, expectedIssu
 		}
 		return nil
 	}
-	return c.doOAuthRequestWithClient(client, req, out)
+	resp, err := c.doOAuthRequestWithClient(client, req, out)
+	if err != nil {
+		if resp != nil {
+			var apiErr *APIError
+			if errors.As(err, &apiErr) {
+				return resp, err
+			}
+			return resp, newAPIError(resp, 0, err.Error(), "oauth.discovery_request_failed")
+		}
+		return nil, fmt.Errorf("BeeAPI OAuth discovery GET %s: %w", target, err)
+	}
+	return resp, nil
 }
 
 func (c *Client) doOAuthRequestNoRedirect(req *http.Request, out any) error {
@@ -422,15 +438,15 @@ func (c *Client) doOAuthRequestNoRedirect(req *http.Request, out any) error {
 	return decodeOAuthResponse(resp, out)
 }
 
-func (c *Client) doOAuthRequestWithClient(client *http.Client, req *http.Request, out any) error {
+func (c *Client) doOAuthRequestWithClient(client *http.Client, req *http.Request, out any) (*http.Response, error) {
 	if client == nil {
 		client = http.DefaultClient
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return err
+		return resp, err
 	}
-	return decodeOAuthResponse(resp, out)
+	return resp, decodeOAuthResponse(resp, out)
 }
 
 func (c *Client) doNoRedirect(req *http.Request) (*http.Response, error) {
@@ -472,7 +488,7 @@ func decodeOAuthResponse(resp *http.Response, out any) error {
 		if message == "" {
 			message = resp.Status
 		}
-		return &APIError{Status: resp.StatusCode, Message: message, Reason: strings.TrimSpace(failure.Error)}
+		return newAPIError(resp, 0, message, failure.Error)
 	}
 	if out == nil || len(strings.TrimSpace(string(b))) == 0 {
 		return nil
@@ -487,7 +503,7 @@ func decodeOAuthResponse(resp *http.Response, out any) error {
 				return err
 			}
 			if env.Code != 0 {
-				return &APIError{Status: resp.StatusCode, Code: env.Code, Message: env.Message, Reason: env.Reason}
+				return newAPIError(resp, env.Code, env.Message, env.Reason)
 			}
 			if len(env.Data) == 0 || string(env.Data) == "null" {
 				return nil
@@ -495,7 +511,16 @@ func decodeOAuthResponse(resp *http.Response, out any) error {
 			return json.Unmarshal(env.Data, out)
 		}
 	}
-	return json.Unmarshal(b, out)
+	if err := json.Unmarshal(b, out); err != nil {
+		contentType := strings.TrimSpace(resp.Header.Get("Content-Type"))
+		message := "OAuth response is not valid JSON"
+		if contentType != "" {
+			message += " (Content-Type " + contentType + ")"
+		}
+		message += ": " + err.Error()
+		return newAPIError(resp, 0, message, "oauth.invalid_response")
+	}
+	return nil
 }
 
 func SortedOAuthScopes(scope string) []string {

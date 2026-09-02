@@ -35,17 +35,80 @@ func New(baseURL string) *Client {
 }
 
 type APIError struct {
-	Status  int
-	Code    int
-	Message string
-	Reason  string
+	Status    int
+	Code      int
+	Message   string
+	Reason    string
+	Method    string
+	URL       string
+	RequestID string
+	CFRay     string
 }
 
 func (e *APIError) Error() string {
+	var message string
 	if e.Reason != "" {
-		return fmt.Sprintf("BeeAPI 返回 %d (%s): %s", e.Status, e.Reason, e.Message)
+		message = fmt.Sprintf("BeeAPI 返回 %d (%s): %s", e.Status, e.Reason, e.Message)
+	} else {
+		message = fmt.Sprintf("BeeAPI 返回 %d: %s", e.Status, e.Message)
 	}
-	return fmt.Sprintf("BeeAPI 返回 %d: %s", e.Status, e.Message)
+	diagnostics := make([]string, 0, 3)
+	if e.URL != "" {
+		request := strings.TrimSpace(e.Method)
+		if request != "" {
+			request += " "
+		}
+		diagnostics = append(diagnostics, request+e.URL)
+	}
+	if e.RequestID != "" {
+		diagnostics = append(diagnostics, "request_id="+e.RequestID)
+	}
+	if e.CFRay != "" {
+		diagnostics = append(diagnostics, "cf_ray="+e.CFRay)
+	}
+	if len(diagnostics) > 0 {
+		message += " [" + strings.Join(diagnostics, "; ") + "]"
+	}
+	return message
+}
+
+func newAPIError(resp *http.Response, code int, message, reason string) *APIError {
+	apiErr := &APIError{
+		Code:    code,
+		Message: strings.TrimSpace(message),
+		Reason:  strings.TrimSpace(reason),
+	}
+	if resp == nil {
+		return apiErr
+	}
+	apiErr.Status = resp.StatusCode
+	apiErr.RequestID = firstResponseHeader(resp, "X-Request-ID", "Request-ID", "X-GitHub-Request-ID")
+	apiErr.CFRay = firstResponseHeader(resp, "CF-Ray")
+	if resp.Request != nil {
+		apiErr.Method = resp.Request.Method
+		if resp.Request.URL != nil {
+			requestURL := *resp.Request.URL
+			// Diagnostic URLs must never echo credentials that a future endpoint
+			// may place in its query string.
+			requestURL.RawQuery = ""
+			requestURL.ForceQuery = false
+			requestURL.Fragment = ""
+			apiErr.URL = requestURL.String()
+		}
+	}
+	return apiErr
+}
+
+func firstResponseHeader(resp *http.Response, names ...string) string {
+	if resp == nil {
+		return ""
+	}
+	for _, name := range names {
+		if value := strings.TrimSpace(resp.Header.Get(name)); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 type envelope struct {
@@ -135,7 +198,7 @@ func (c *Client) requestWithProofHeaders(ctx context.Context, method, path strin
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(b, &fields); err != nil {
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return &APIError{Status: resp.StatusCode, Message: strings.TrimSpace(string(b))}
+			return newAPIError(resp, 0, strings.TrimSpace(string(b)), "")
 		}
 		if out == nil {
 			return nil
@@ -149,13 +212,13 @@ func (c *Client) requestWithProofHeaders(ctx context.Context, method, path strin
 		if description == "" {
 			description = reason
 		}
-		return &APIError{Status: resp.StatusCode, Message: description, Reason: reason}
+		return newAPIError(resp, 0, description, reason)
 	}
 	_, hasCode := fields["code"]
 	_, hasData := fields["data"]
 	if !hasCode && !hasData {
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return &APIError{Status: resp.StatusCode, Message: resp.Status}
+			return newAPIError(resp, 0, resp.Status, "")
 		}
 		if out == nil {
 			return nil
@@ -171,7 +234,7 @@ func (c *Client) requestWithProofHeaders(ctx context.Context, method, path strin
 		if message == "" {
 			message = resp.Status
 		}
-		return &APIError{Status: resp.StatusCode, Code: env.Code, Message: message, Reason: env.Reason}
+		return newAPIError(resp, env.Code, message, env.Reason)
 	}
 	if out == nil || len(env.Data) == 0 || string(env.Data) == "null" {
 		return nil
@@ -449,7 +512,7 @@ func (c *Client) Usage(ctx context.Context, apiKey string) (Usage, error) {
 		if message == "" {
 			message = resp.Status
 		}
-		return usage, &APIError{Status: resp.StatusCode, Message: message}
+		return usage, newAPIError(resp, 0, message, "")
 	}
 	if err := json.Unmarshal(body, &usage); err != nil {
 		return usage, err

@@ -1,14 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { resolveReleaseRoute } from "../worker/releases.ts";
+import { parseLatestReleaseTag, resolveReleaseRoute } from "../worker/releases.ts";
 
 test("release cache only proxies fixed BeeAPI artifacts", () => {
   const metadata = resolveReleaseRoute(new URL("https://getbeeapi.com/releases/latest.json"));
   assert.deepEqual(metadata, {
     upstream: "https://api.github.com/repos/BeeAPI-AI/beeapi/releases/latest",
-    cacheSeconds: 300,
+    cacheSeconds: 60,
     immutable: false,
+    latestRedirectFallback: "https://github.com/BeeAPI-AI/beeapi/releases/latest",
   });
 
   const latest = resolveReleaseRoute(new URL("https://getbeeapi.com/releases/latest/download/beeapi_linux_amd64.tar.gz"));
@@ -21,6 +22,20 @@ test("release cache only proxies fixed BeeAPI artifacts", () => {
   const versioned = resolveReleaseRoute(new URL("https://getbeeapi.com/releases/v1.2.3/download/beeapi_windows_arm64.zip.sha256"));
   assert.equal(versioned?.upstream, "https://github.com/BeeAPI-AI/beeapi/releases/download/v1.2.3/beeapi_windows_arm64.zip.sha256");
   assert.equal(versioned?.immutable, true);
+});
+
+test("latest release redirect fallback only accepts this repository's semver tags", () => {
+  assert.equal(parseLatestReleaseTag("https://github.com/BeeAPI-AI/beeapi/releases/tag/v0.5.0"), "v0.5.0");
+  assert.equal(parseLatestReleaseTag("/BeeAPI-AI/beeapi/releases/tag/v1.2.3-rc.1"), "v1.2.3-rc.1");
+  for (const location of [
+    "https://attacker.example/BeeAPI-AI/beeapi/releases/tag/v0.5.0",
+    "https://github.com/other/repo/releases/tag/v0.5.0",
+    "https://github.com/BeeAPI-AI/beeapi/releases/tag/latest",
+    "https://github.com/BeeAPI-AI/beeapi/releases/tag/v0.5.0%2Fmalicious",
+    "https://github.com/BeeAPI-AI/beeapi/releases/tag/v0.5.0?next=attacker",
+  ]) {
+    assert.equal(parseLatestReleaseTag(location), null, location);
+  }
 });
 
 test("release cache supports fixed CFST metadata and artifacts", () => {
