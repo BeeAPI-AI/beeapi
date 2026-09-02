@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { parseLatestReleaseTag, resolveReleaseRoute } from "../worker/releases.ts";
+import { isRetiredBeeAPIReleasePath, parseLatestReleaseTag, resolveReleaseRoute } from "../worker/releases.ts";
 
 test("release cache only proxies fixed BeeAPI artifacts", () => {
   const metadata = resolveReleaseRoute(new URL("https://getbeeapi.com/releases/latest.json"));
@@ -36,6 +36,23 @@ test("latest release redirect fallback only accepts this repository's semver tag
   ]) {
     assert.equal(parseLatestReleaseTag(location), null, location);
   }
+});
+
+test("release cache retires BeeAPI binaries older than v0.5.0 without affecting current or future packages", () => {
+  for (const version of ["v0.1.0", "v0.2.5", "v0.3.0", "v0.4.0", "v0.4.999"]) {
+    const url = new URL(`https://getbeeapi.com/releases/${version}/download/beeapi_linux_amd64.tar.gz`);
+    assert.equal(isRetiredBeeAPIReleasePath(url), true, version);
+    assert.equal(resolveReleaseRoute(url), null, version);
+  }
+  const prerelease = new URL("https://getbeeapi.com/releases/v0.5.0-rc.1/download/beeapi_linux_amd64.tar.gz");
+  assert.equal(isRetiredBeeAPIReleasePath(prerelease), true);
+  assert.equal(resolveReleaseRoute(prerelease), null);
+  for (const version of ["v0.5.0", "v0.5.0+build.1", "v0.6.0", "v1.0.0"]) {
+    const url = new URL(`https://getbeeapi.com/releases/${version}/download/beeapi_linux_amd64.tar.gz`);
+    assert.equal(isRetiredBeeAPIReleasePath(url), false, version);
+    assert.equal(resolveReleaseRoute(url)?.upstream, `https://github.com/BeeAPI-AI/beeapi/releases/download/${version}/beeapi_linux_amd64.tar.gz`, version);
+  }
+  assert.equal(isRetiredBeeAPIReleasePath(new URL("https://getbeeapi.com/releases/v0.4.0/download/not-a-beeapi-asset")), false);
 });
 
 test("release cache supports fixed CFST metadata and artifacts", () => {

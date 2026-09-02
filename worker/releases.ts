@@ -9,13 +9,31 @@ export interface ReleaseRoute {
   };
 }
 
-const versionPattern = "v[0-9][0-9A-Za-z._-]{0,63}";
+const versionPattern = "v[0-9]{1,9}\\.[0-9]{1,9}\\.[0-9]{1,9}(?:[-+][0-9A-Za-z.-]{1,64})?";
 const beeapiAssetPattern = "beeapi_(?:linux|darwin|windows)_(?:amd64|arm64)\\.(?:tar\\.gz|zip)(?:\\.sha256)?";
 const cfstAssetPattern = "cfst_(?:linux|darwin|windows)_(?:amd64|arm64)\\.(?:tar\\.gz|zip)";
+const minimumBeeAPIRelease = [0, 5, 0] as const;
 
 const beeapiRelease = new RegExp(`^/releases/(latest|${versionPattern})/download/(${beeapiAssetPattern})$`);
 const cfstRelease = new RegExp(`^/releases/cfst/(${versionPattern})/(${cfstAssetPattern})$`);
 const beeapiLatestRedirect = "https://github.com/BeeAPI-AI/beeapi/releases/latest";
+
+function beeapiReleaseIsRetired(version: string): boolean {
+  const match = /^v([0-9]{1,9})\.([0-9]{1,9})\.([0-9]{1,9})([-+][0-9A-Za-z.-]{1,64})?$/.exec(version);
+  if (!match) return false;
+  const parts = match.slice(1, 4).map(Number);
+  for (let index = 0; index < minimumBeeAPIRelease.length; index += 1) {
+    if (parts[index] !== minimumBeeAPIRelease[index]) {
+      return parts[index] < minimumBeeAPIRelease[index];
+    }
+  }
+  return match[4]?.startsWith("-") ?? false;
+}
+
+export function isRetiredBeeAPIReleasePath(url: URL): boolean {
+  const match = beeapiRelease.exec(url.pathname);
+  return Boolean(match && match[1] !== "latest" && beeapiReleaseIsRetired(match[1]));
+}
 
 export function parseLatestReleaseTag(location: string): string | null {
   let target: URL;
@@ -110,6 +128,7 @@ export function resolveReleaseRoute(url: URL): ReleaseRoute | null {
   const beeapi = beeapiRelease.exec(url.pathname);
   if (beeapi) {
     const [, version, asset] = beeapi;
+    if (version !== "latest" && beeapiReleaseIsRetired(version)) return null;
     return {
       upstream: `https://github.com/BeeAPI-AI/beeapi/releases/${version === "latest" ? "latest/download" : `download/${version}`}/${asset}`,
       cacheSeconds: version === "latest" ? 300 : 31_536_000,

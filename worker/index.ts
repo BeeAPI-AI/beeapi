@@ -2,7 +2,7 @@
 import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
 import { handleInstallStatsRequest } from "./install-stats";
-import { parseLatestReleaseTag, resolveReleaseRoute } from "./releases";
+import { isRetiredBeeAPIReleasePath, parseLatestReleaseTag, resolveReleaseRoute } from "./releases";
 
 const releaseResponseHeaders = [
   "content-disposition",
@@ -149,6 +149,16 @@ const worker = {
     const url = new URL(request.url);
 
     if (url.pathname.startsWith("/releases/")) {
+      if (isRetiredBeeAPIReleasePath(url)) {
+        return new Response("This BeeAPI release has been retired. Install the latest release from https://getbeeapi.com/.", {
+          status: 410,
+          headers: {
+            "Cache-Control": "no-store",
+            "Content-Type": "text/plain; charset=utf-8",
+            "X-Content-Type-Options": "nosniff",
+          },
+        });
+      }
       const release = await fetchRelease(request, ctx);
       if (release) return release;
     }
