@@ -288,8 +288,11 @@ func TestOAuthKeySelectionForToolShowsOnlyCompatibleKeysAndSelectsOne(t *testing
 		t.Fatalf("unexpected single-tool Key selection: %#v", selected)
 	}
 	text := output.String()
-	if !strings.Contains(text, "Chat only") || !strings.Contains(text, "不适用于 Codex") {
-		t.Fatalf("incompatible Key was not explained:\n%s", text)
+	if strings.Contains(text, "Chat only") || strings.Contains(text, "sk-chat") {
+		t.Fatalf("incompatible Key was shown in the selectable list:\n%s", text)
+	}
+	if !strings.Contains(text, "已隐藏 1 个不可用于 Codex 的 API Key") {
+		t.Fatalf("hidden incompatible Key count was not explained:\n%s", text)
 	}
 	if strings.Contains(text, "可逗号多选") {
 		t.Fatalf("single-tool flow still offered multi-select:\n%s", text)

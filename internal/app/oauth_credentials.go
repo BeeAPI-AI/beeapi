@@ -335,6 +335,7 @@ func oauthKeySelectableMetadata(key beeapi.OAuthAPIKey) bool {
 func (r *runner) selectOAuthKeyChoices(choices []oauthKeyChoice) ([]oauthKeyChoice, error) {
 	r.line(r.out, "\n  选择要用于本机配置的 BeeAPI API Key", "\n  Choose BeeAPI API Keys for this computer")
 	selectable := make([]int, 0, len(choices))
+	hidden := 0
 	for index, choice := range choices {
 		name := strings.TrimSpace(choice.Key.Name)
 		if name == "" {
@@ -345,19 +346,18 @@ func (r *runner) selectOAuthKeyChoices(choices []oauthKeyChoice) ([]oauthKeyChoi
 			prefix = r.text("前缀未知", "Unknown prefix")
 		}
 		if !oauthKeySelectableMetadata(choice.Key) {
-			reason := strings.TrimSpace(choice.Key.UnavailableReason)
-			if reason == "" {
-				reason = strings.TrimSpace(choice.Key.Status)
-			}
-			fmt.Fprintf(r.out, "    × %s · %s · %s\n", name, prefix, r.credentialSkipReason(reason))
+			hidden++
 			continue
 		}
 		if choice.Err != nil {
-			r.format(r.out, "    × %s · %s · 无法读取模型：%v\n", "    × %s · %s · Could not load models: %v\n", name, prefix, choice.Err)
+			hidden++
 			continue
 		}
 		selectable = append(selectable, index)
 		fmt.Fprintf(r.out, "    %d. ✓ %s · %s · %d %s\n", len(selectable), name, prefix, len(choice.Models), r.text("个模型", "model(s)"))
+	}
+	if hidden > 0 {
+		r.format(r.out, "  已隐藏 %d 个当前不可用的 API Key。\n", "  Hidden %d API Key(s) that are currently unavailable.\n", hidden)
 	}
 	if len(selectable) == 0 {
 		return nil, errors.New(r.text("没有同时可导出且有可用模型的 API Key", "No API Key is both exportable and backed by available models"))
@@ -400,6 +400,7 @@ func (r *runner) selectOAuthKeyChoices(choices []oauthKeyChoice) ([]oauthKeyChoi
 func (r *runner) selectOAuthKeyChoiceForAgent(choices []oauthKeyChoice, agent string) ([]oauthKeyChoice, error) {
 	r.line(r.out, "\n  选择要用于本机配置的 BeeAPI API Key", "\n  Choose the BeeAPI API Key for this configuration")
 	selectable := make([]int, 0, len(choices))
+	hidden := 0
 	for index, choice := range choices {
 		name := strings.TrimSpace(choice.Key.Name)
 		if name == "" {
@@ -410,15 +411,11 @@ func (r *runner) selectOAuthKeyChoiceForAgent(choices []oauthKeyChoice, agent st
 			prefix = r.text("前缀未知", "Unknown prefix")
 		}
 		if !oauthKeySelectableMetadata(choice.Key) {
-			reason := strings.TrimSpace(choice.Key.UnavailableReason)
-			if reason == "" {
-				reason = strings.TrimSpace(choice.Key.Status)
-			}
-			fmt.Fprintf(r.out, "    × %s · %s · %s\n", name, prefix, r.credentialSkipReason(reason))
+			hidden++
 			continue
 		}
 		if choice.Err != nil {
-			r.format(r.out, "    × %s · %s · 无法读取模型：%v\n", "    × %s · %s · Could not load models: %v\n", name, prefix, choice.Err)
+			hidden++
 			continue
 		}
 		credential := credentialMaterial{
@@ -426,12 +423,14 @@ func (r *runner) selectOAuthKeyChoiceForAgent(choices []oauthKeyChoice, agent st
 		}
 		compatible, compatibilityErr := compatibleModelsForAgent(agent, credential)
 		if compatibilityErr != nil {
-			r.format(r.out, "    × %s · %s · 不适用于 %s：%s\n", "    × %s · %s · Not compatible with %s: %s\n",
-				name, prefix, agentLabel(agent), r.localizedErrorMessage(compatibilityErr))
+			hidden++
 			continue
 		}
 		selectable = append(selectable, index)
 		fmt.Fprintf(r.out, "    %d. ✓ %s · %s · %d %s\n", len(selectable), name, prefix, len(compatible), r.text("个兼容模型", "compatible model(s)"))
+	}
+	if hidden > 0 {
+		r.format(r.out, "  已隐藏 %d 个不可用于 %s 的 API Key。\n", "  Hidden %d API Key(s) that cannot be used with %s.\n", hidden, agentLabel(agent))
 	}
 	if len(selectable) == 0 {
 		return nil, fmt.Errorf(r.text("没有可用于 %s 的 API Key，请在 BeeAPI 检查 Key 路由与模型权限", "No API Key is compatible with %s; check its routing and model access in BeeAPI"), agentLabel(agent))

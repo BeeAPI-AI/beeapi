@@ -14,6 +14,7 @@ import (
 const (
 	startupUpdateTimeout = 3 * time.Second
 	updateNoticeInterval = 24 * time.Hour
+	updateInstallTimeout = 12 * time.Minute
 )
 
 func (r *runner) updaterClient() *updater.Client {
@@ -117,12 +118,82 @@ func (r *runner) installUpdateRelease(release updater.Release, target string) (u
 	if baseCtx == nil {
 		baseCtx = context.Background()
 	}
-	ctx, cancel := context.WithTimeout(baseCtx, 5*time.Minute)
+	ctx, cancel := context.WithTimeout(baseCtx, updateInstallTimeout)
 	defer cancel()
 	if r.updateInstall != nil {
 		return r.updateInstall(ctx, release, target)
 	}
-	return r.updaterClient().Install(ctx, release, target)
+	client := *r.updaterClient()
+	if client.OnDownload == nil {
+		client.OnDownload = r.updateDownloadReporter()
+	}
+	return client.Install(ctx, release, target)
+}
+
+func (r *runner) updateDownloadReporter() func(updater.DownloadEvent) {
+	interactive := r.interactiveTerminal()
+	progressLine := false
+	lastPercent := -1
+	finishProgressLine := func() {
+		if progressLine {
+			fmt.Fprintln(r.out)
+			progressLine = false
+		}
+	}
+	return func(event updater.DownloadEvent) {
+		switch event.Status {
+		case updater.DownloadStarted:
+			finishProgressLine()
+			lastPercent = -1
+			r.format(r.out, "  下载来源: %s\n", "  Download source: %s\n", event.Source)
+		case updater.DownloadProgress:
+			if !interactive {
+				return
+			}
+			if event.Total > 0 {
+				percent := int(event.Downloaded * 100 / event.Total)
+				if percent > 100 {
+					percent = 100
+				}
+				if percent == lastPercent {
+					return
+				}
+				lastPercent = percent
+				fmt.Fprintf(r.out, "\r  %s %3d%% · %s / %s", r.text("下载进度", "Download progress"), percent,
+					formatDownloadSize(event.Downloaded), formatDownloadSize(event.Total))
+			} else {
+				fmt.Fprintf(r.out, "\r  %s %s", r.text("下载进度", "Download progress"), formatDownloadSize(event.Downloaded))
+			}
+			progressLine = true
+		case updater.DownloadFailed:
+			finishProgressLine()
+			if event.WillRetry {
+				r.format(r.errOut, "  ↷ %s 下载失败：%s；正在尝试下一来源…\n", "  ↷ %s failed: %s; trying the next source…\n", event.Source, event.Error)
+			} else {
+				r.format(r.errOut, "  × %s 下载失败：%s\n", "  × %s failed: %s\n", event.Source, event.Error)
+			}
+		case updater.DownloadVerified:
+			finishProgressLine()
+			r.format(r.out, "  ✓ %s 下载完成并通过 SHA-256 校验。\n", "  ✓ %s downloaded and passed SHA-256 verification.\n", event.Source)
+		}
+	}
+}
+
+func formatDownloadSize(bytes int64) string {
+	if bytes < 0 {
+		bytes = 0
+	}
+	const (
+		kib = 1 << 10
+		mib = 1 << 20
+	)
+	if bytes >= mib {
+		return fmt.Sprintf("%.1f MiB", float64(bytes)/mib)
+	}
+	if bytes >= kib {
+		return fmt.Sprintf("%.0f KiB", float64(bytes)/kib)
+	}
+	return fmt.Sprintf("%d B", bytes)
 }
 
 func (r *runner) printUpdateInstalled(result updater.Result, target string) {

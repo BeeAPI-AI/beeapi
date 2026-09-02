@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -23,10 +24,18 @@ import (
 )
 
 const (
-	maxMetadataBytes = 2 << 20
-	maxChecksumBytes = 4 << 10
-	maxArchiveBytes  = 160 << 20
-	maxBinaryBytes   = 160 << 20
+	maxMetadataBytes        = 2 << 20
+	maxChecksumBytes        = 4 << 10
+	maxArchiveBytes         = 160 << 20
+	maxBinaryBytes          = 160 << 20
+	connectTimeout          = 10 * time.Second
+	tlsHandshakeTimeout     = 10 * time.Second
+	responseHeaderTimeout   = 20 * time.Second
+	metadataRequestTimeout  = 20 * time.Second
+	archiveDownloadTimeout  = 5 * time.Minute
+	checksumDownloadTimeout = 30 * time.Second
+	progressByteInterval    = 256 << 10
+	progressTimeInterval    = 500 * time.Millisecond
 )
 
 var releaseTagPattern = regexp.MustCompile(`^v?[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$`)
@@ -43,6 +52,25 @@ type Result struct {
 	Scheduled bool
 }
 
+type DownloadEventStatus string
+
+const (
+	DownloadStarted  DownloadEventStatus = "started"
+	DownloadProgress DownloadEventStatus = "progress"
+	DownloadFailed   DownloadEventStatus = "failed"
+	DownloadVerified DownloadEventStatus = "verified"
+)
+
+type DownloadEvent struct {
+	Status     DownloadEventStatus
+	Source     string
+	Asset      string
+	Downloaded int64
+	Total      int64
+	Error      string
+	WillRetry  bool
+}
+
 type Client struct {
 	HTTP          *http.Client
 	MetadataURLs  []string
@@ -50,22 +78,12 @@ type Client struct {
 	GOOS          string
 	GOARCH        string
 	AllowHTTP     bool
+	OnDownload    func(DownloadEvent)
 }
 
 func DefaultClient() *Client {
 	return &Client{
-		HTTP: &http.Client{
-			Timeout: 20 * time.Second,
-			CheckRedirect: func(request *http.Request, via []*http.Request) error {
-				if len(via) >= 5 {
-					return errors.New("too many redirects")
-				}
-				if request.URL.Scheme != "https" {
-					return errors.New("update redirect must use HTTPS")
-				}
-				return nil
-			},
-		},
+		HTTP: newHTTPClient(),
 		MetadataURLs: []string{
 			"https://getbeeapi.com/releases/latest.json",
 			"https://api.github.com/repos/BeeAPI-AI/beeapi/releases/latest",
@@ -88,8 +106,10 @@ func (c *Client) Latest(ctx context.Context) (Release, error) {
 			lastErr = err
 			continue
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, raw, nil)
+		requestCtx, cancel := context.WithTimeout(ctx, metadataRequestTimeout)
+		req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, raw, nil)
 		if err != nil {
+			cancel()
 			lastErr = err
 			continue
 		}
@@ -97,11 +117,13 @@ func (c *Client) Latest(ctx context.Context) (Release, error) {
 		req.Header.Set("User-Agent", "beeapi-cli-update/1")
 		resp, err := c.httpClient().Do(req)
 		if err != nil {
+			cancel()
 			lastErr = err
 			continue
 		}
 		body, readErr := readLimited(resp.Body, maxMetadataBytes)
 		resp.Body.Close()
+		cancel()
 		if readErr != nil {
 			lastErr = readErr
 			continue
@@ -316,39 +338,44 @@ func normalizeVersion(raw string) string {
 }
 
 func (c *Client) downloadVerified(ctx context.Context, version, asset, archivePath, checksumPath string) (string, error) {
-	var lastErr error
-	for _, template := range c.DownloadBases {
+	var failures []string
+	for index, template := range c.DownloadBases {
 		base := strings.TrimRight(strings.ReplaceAll(template, "{version}", url.PathEscape(version)), "/")
+		source := updateSourceLabel(base)
 		if err := c.validateSourceURL(base); err != nil {
-			lastErr = err
+			failures = append(failures, fmt.Sprintf("%s: %v", source, err))
 			continue
 		}
 		archiveURL, checksumURL := base+"/"+asset, base+"/"+asset+".sha256"
-		if err := c.downloadFile(ctx, archiveURL, archivePath, maxArchiveBytes); err != nil {
-			lastErr = err
+		c.emitDownload(DownloadEvent{Status: DownloadStarted, Source: source, Asset: asset})
+		if err := c.downloadFile(ctx, archiveURL, archivePath, maxArchiveBytes, archiveDownloadTimeout, source, asset, true); err != nil {
+			c.recordDownloadFailure(&failures, source, asset, err, index+1 < len(c.DownloadBases))
 			continue
 		}
-		if err := c.downloadFile(ctx, checksumURL, checksumPath, maxChecksumBytes); err != nil {
-			lastErr = err
+		if err := c.downloadFile(ctx, checksumURL, checksumPath, maxChecksumBytes, checksumDownloadTimeout, source, asset+".sha256", false); err != nil {
+			c.recordDownloadFailure(&failures, source, asset, err, index+1 < len(c.DownloadBases))
 			continue
 		}
 		if err := verifySHA256(archivePath, checksumPath); err != nil {
-			lastErr = err
+			c.recordDownloadFailure(&failures, source, asset, err, index+1 < len(c.DownloadBases))
 			continue
 		}
+		c.emitDownload(DownloadEvent{Status: DownloadVerified, Source: source, Asset: asset})
 		return base, nil
 	}
-	if lastErr == nil {
-		lastErr = errors.New("no update download source is configured")
+	if len(failures) == 0 {
+		return "", errors.New("no update download source is configured")
 	}
-	return "", lastErr
+	return "", fmt.Errorf("all update sources failed: %s", strings.Join(failures, "; "))
 }
 
-func (c *Client) downloadFile(ctx context.Context, raw, destination string, maxBytes int64) error {
+func (c *Client) downloadFile(ctx context.Context, raw, destination string, maxBytes int64, timeout time.Duration, source, asset string, reportProgress bool) error {
 	if err := c.validateSourceURL(raw); err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, raw, nil)
+	requestCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, raw, nil)
 	if err != nil {
 		return err
 	}
@@ -369,7 +396,22 @@ func (c *Client) downloadFile(ctx context.Context, raw, destination string, maxB
 	if err != nil {
 		return err
 	}
-	written, copyErr := io.Copy(file, io.LimitReader(resp.Body, maxBytes+1))
+	writer := io.Writer(file)
+	var progress *downloadProgressWriter
+	if reportProgress {
+		progress = &downloadProgressWriter{
+			writer: file,
+			report: func(downloaded int64) {
+				c.emitDownload(DownloadEvent{Status: DownloadProgress, Source: source, Asset: asset, Downloaded: downloaded, Total: resp.ContentLength})
+			},
+		}
+		writer = progress
+		progress.reportNow()
+	}
+	written, copyErr := io.Copy(writer, io.LimitReader(resp.Body, maxBytes+1))
+	if progress != nil {
+		progress.reportNow()
+	}
 	closeErr := file.Close()
 	if copyErr != nil {
 		return copyErr
@@ -381,6 +423,54 @@ func (c *Client) downloadFile(ctx context.Context, raw, destination string, maxB
 		return errors.New("update artifact exceeds the size limit")
 	}
 	return nil
+}
+
+type downloadProgressWriter struct {
+	writer       io.Writer
+	report       func(int64)
+	written      int64
+	lastReported int64
+	lastReport   time.Time
+}
+
+func (w *downloadProgressWriter) Write(data []byte) (int, error) {
+	written, err := w.writer.Write(data)
+	w.written += int64(written)
+	if w.written-w.lastReported >= progressByteInterval || time.Since(w.lastReport) >= progressTimeInterval {
+		w.reportNow()
+	}
+	return written, err
+}
+
+func (w *downloadProgressWriter) reportNow() {
+	if w == nil || w.report == nil {
+		return
+	}
+	w.lastReported = w.written
+	w.lastReport = time.Now()
+	w.report(w.written)
+}
+
+func (c *Client) emitDownload(event DownloadEvent) {
+	if c != nil && c.OnDownload != nil {
+		c.OnDownload(event)
+	}
+}
+
+func (c *Client) recordDownloadFailure(failures *[]string, source, asset string, err error, willRetry bool) {
+	*failures = append(*failures, fmt.Sprintf("%s: %v", source, err))
+	c.emitDownload(DownloadEvent{
+		Status: DownloadFailed, Source: source, Asset: asset,
+		Error: err.Error(), WillRetry: willRetry,
+	})
+}
+
+func updateSourceLabel(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err == nil && parsed.Hostname() != "" {
+		return parsed.Hostname()
+	}
+	return raw
 }
 
 func verifySHA256(archivePath, checksumPath string) error {
@@ -568,7 +658,41 @@ func (c *Client) httpClient() *http.Client {
 	if c.HTTP != nil {
 		return c.HTTP
 	}
-	return &http.Client{Timeout: 20 * time.Second}
+	return newHTTPClient()
+}
+
+func newHTTPClient() *http.Client {
+	transport, ok := http.DefaultTransport.(*http.Transport)
+	if ok {
+		transport = transport.Clone()
+	} else {
+		transport = &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			ForceAttemptHTTP2:     true,
+			MaxIdleConns:          100,
+			IdleConnTimeout:       90 * time.Second,
+			ExpectContinueTimeout: time.Second,
+		}
+	}
+	transport.DialContext = (&net.Dialer{Timeout: connectTimeout, KeepAlive: 30 * time.Second}).DialContext
+	transport.TLSHandshakeTimeout = tlsHandshakeTimeout
+	transport.ResponseHeaderTimeout = responseHeaderTimeout
+
+	return &http.Client{
+		// The caller and each download request own the total deadline. Setting
+		// Client.Timeout here would also time-limit reading the response body,
+		// which breaks otherwise healthy downloads on slower connections.
+		Transport: transport,
+		CheckRedirect: func(request *http.Request, via []*http.Request) error {
+			if len(via) >= 5 {
+				return errors.New("too many redirects")
+			}
+			if request.URL.Scheme != "https" {
+				return errors.New("update redirect must use HTTPS")
+			}
+			return nil
+		},
+	}
 }
 
 func (c *Client) goos() string {

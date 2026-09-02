@@ -239,6 +239,10 @@ func (r *runner) chooseSavedCredentialForAgent(cfg state.Config, agent string) (
 		return credentialMaterial{}, false, err
 	}
 	compatible := compatibleCredentialIndexes(agent, credentials)
+	hidden := len(credentials) - len(compatible)
+	if hidden > 0 {
+		r.format(r.out, "  已隐藏 %d 个不可用于 %s 的本机 API Key。\n", "  Hidden %d saved API Key(s) that cannot be used with %s.\n", hidden, agentLabel(agent))
+	}
 	if len(compatible) == 0 {
 		r.format(r.out, "  本机已保存的 Key 暂无适用于 %s 的模型。\n", "  No saved Key currently has a model compatible with %s.\n", agentLabel(agent))
 		return credentialMaterial{}, false, nil

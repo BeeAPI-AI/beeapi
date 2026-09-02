@@ -118,3 +118,21 @@ func TestDevelopmentVersionDoesNotMakeStartupNetworkRequest(t *testing.T) {
 		t.Fatalf("development startup update check = exit %v, err %v", exit, err)
 	}
 }
+
+func TestUpdateDownloadReporterShowsProgressAndFallbackSource(t *testing.T) {
+	var output bytes.Buffer
+	r := &runner{language: languageChinese, out: &output, errOut: &output, interactive: func() bool { return true }}
+	report := r.updateDownloadReporter()
+	report(updater.DownloadEvent{Status: updater.DownloadStarted, Source: "getbeeapi.com", Asset: "beeapi_windows_amd64.zip"})
+	report(updater.DownloadEvent{Status: updater.DownloadProgress, Source: "getbeeapi.com", Downloaded: 1 << 20, Total: 4 << 20})
+	report(updater.DownloadEvent{Status: updater.DownloadFailed, Source: "getbeeapi.com", Error: "timeout", WillRetry: true})
+	report(updater.DownloadEvent{Status: updater.DownloadStarted, Source: "github.com", Asset: "beeapi_windows_amd64.zip"})
+	report(updater.DownloadEvent{Status: updater.DownloadVerified, Source: "github.com"})
+
+	text := output.String()
+	for _, want := range []string{"下载来源: getbeeapi.com", "下载进度", "25%", "正在尝试下一来源", "下载来源: github.com", "通过 SHA-256 校验"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("download report is missing %q:\n%s", want, text)
+		}
+	}
+}

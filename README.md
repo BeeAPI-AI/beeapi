@@ -21,7 +21,7 @@ GetBeeAPI 是把 BeeAPI 快速接入现有 AI 工具的跨平台配置器，不�
 2. 通过 BeeAPI OAuth 连接账户。`beeapi.ai` 与 `beeapi.dev` 各自形成独立 OAuth 安全域，CLI 会始终在用户选中的域名完成 discovery、授权、Token、设备码与账户 API；切换域名必须重新授权。桌面端使用 Authorization Code + PKCE 与本机回调，SSH/无桌面环境使用标准 Device Grant 并始终显示完整授权网址。首次连接只保存账户会话并读取余额，不会提前要求用户选择一批 API Key。也可直接粘贴单个 API Key 作为兼容回退。
 3. 保存账户和网络入口后进入主页。工具、API Key、模型与工具专属参数在“配置 AI 工具”中按单个工具逐一选择。
 
-首次设置完成后，再输入 `beeapi` 只显示四个主要入口：配置 AI 工具、查看/切换当前工具配置、启动已配置工具和设置。配置时先选择一个工具，再选择一枚与该工具兼容的 API Key、模型和工具专属参数，最后命名并启用方案；本机已安全保存的兼容 Key 可直接复用，列表末尾可继续从 BeeAPI 账户选择其他 Key。支持推理的模型会继续显示该工具自己的思考等级选项：Claude Code、Codex、Gemini CLI、Grok Build、OpenCode、OpenClaw 与 Hermes 分别写入原生字段，不会把 Codex 配置生搬到其他工具；Claude Desktop 没有稳定公开的持久化字段，因此不显示伪选项。每个工具独立拥有多套方案：例如 Codex 可以在“工作 Key”和“日常 Key”之间切换，同时 Grok Build 继续使用自己的 Key，不会被一起改动。同一个方案名称也可以在不同工具中重复使用。
+首次设置完成后，再输入 `beeapi` 只显示四个主要入口：配置 AI 工具、查看/切换当前工具配置、启动已配置工具和设置。配置时先选择一个工具，再选择一枚与该工具兼容的 API Key、模型和工具专属参数，最后命名并启用方案；本机已安全保存的兼容 Key 可直接复用，列表末尾可继续从 BeeAPI 账户选择其他 Key。Key 列表只显示协议兼容且确实有可用模型的项目，并统一提示隐藏了多少个不可用于当前工具的 Key。支持推理的模型会继续显示该工具自己的思考等级选项：Claude Code、Codex、Gemini CLI、Grok Build、OpenCode、OpenClaw 与 Hermes 分别写入原生字段，不会把 Codex 配置生搬到其他工具；Claude Desktop 没有稳定公开的持久化字段，因此不显示伪选项。每个工具独立拥有多套方案：例如 Codex 可以在“工作 Key”和“日常 Key”之间切换，同时 Grok Build 继续使用自己的 Key，不会被一起改动。同一个方案名称也可以在不同工具中重复使用。
 
 CLI 永远不会询问 BeeAPI 账号密码，也不会读取网页登录 Cookie。网页明确显示 OAuth 权限；账户 Token 采用 DPoP 设备绑定，只能读取获准的账户资料、余额、Key 元数据与模型能力，不能调用模型。用户在终端选中 Key 后，BeeAPI 通过短期幂等窗口一次性交付该 Key；CLI 先写入系统凭据存储，再发送 ACK，不额外创建 Key。网页批准、Token 交换或 Key 导出遇到瞬时断线时会按同一请求安全恢复；账户或 Key 已保存后，后续步骤失败可从断点继续。协议见 [OAuth 账户连接契约](docs/device-authorization.md)。不方便使用网页授权时，可直接使用单 Key 兼容模式。
 
@@ -87,7 +87,7 @@ beeapi token print --agent codex 仅向 Codex 的 BeeAPI provider 提供已分�
 ## 安全边界
 
 - CLI 与测速组件优先通过 `getbeeapi.com` 的固定白名单发行缓存下载，缓存异常时回退对应 GitHub Release；两条路径都必须通过同一 SHA-256 摘要校验。
-- 正式版本无参数启动时至多每 24 小时检查一次更新，不会自动安装；只有用户运行 `beeapi update` 才下载当前平台发行包，并在 SHA-256 校验和安全解包通过后替换程序。
+- 正式版本无参数启动时至多每 24 小时检查一次更新，不会自动安装；只有用户确认或运行 `beeapi update` 才下载当前平台发行包。更新器分别限制连接、TLS 和响应头等待，每个下载来源允许最多 5 分钟并显示进度；GetBeeAPI 镜像失败时会说明原因并使用独立时限回退 GitHub，最终仍须通过 SHA-256 校验和安全解包才能替换程序。
 - 优选 IP 必须以 BeeAPI 域名作为 SNI，通过 TLS 证书与业务接口双重验证后才能写入 Hosts。
 - CloudflareSpeedTest 只负责 TCP 443 初筛；CLI 会并发复验前 20 个候选的 `/healthz` 实际延迟。全部失败时不会写 Hosts，而是继续使用已探测到的可用域名。
 - Hosts 只写入带 `getbeeapi managed` 标记的区块；写入前备份，可独立移除。

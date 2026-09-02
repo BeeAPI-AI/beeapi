@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -79,6 +80,102 @@ func TestInstallDownloadsChecksumVerifiesAndAtomicallyReplaces(t *testing.T) {
 	}
 	if string(body) != "new-beeapi-binary" || result.Version != "v1.2.3" || result.Scheduled {
 		t.Fatalf("unexpected install result: result=%#v body=%q", result, body)
+	}
+}
+
+func TestDefaultClientDoesNotApplyAWholeBodyTimeout(t *testing.T) {
+	client := DefaultClient()
+	if client.HTTP == nil {
+		t.Fatal("default update HTTP client is nil")
+	}
+	if client.HTTP.Timeout != 0 {
+		t.Fatalf("whole-request timeout = %s, want zero so slow response bodies use the per-download context", client.HTTP.Timeout)
+	}
+	transport, ok := client.HTTP.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("default transport type = %T", client.HTTP.Transport)
+	}
+	if transport.DialContext == nil || transport.TLSHandshakeTimeout != tlsHandshakeTimeout || transport.ResponseHeaderTimeout != responseHeaderTimeout {
+		t.Fatalf("network phase timeouts were not configured: %#v", transport)
+	}
+}
+
+func TestInstallReportsFailedSourceAndFallsBack(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("synchronous replacement is covered by the Windows locked-executable test")
+	}
+	archive := tarGzFixture(t, "beeapi", []byte("fallback-beeapi-binary"))
+	digest := sha256.Sum256(archive)
+	httpClient := &http.Client{Transport: updaterRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Host == "slow.test" {
+			return nil, errors.New("simulated timeout")
+		}
+		if strings.HasSuffix(request.URL.Path, ".sha256") {
+			return updaterResponse(request, http.StatusOK, []byte(fmt.Sprintf("%x\n", digest))), nil
+		}
+		return updaterResponse(request, http.StatusOK, archive), nil
+	})}
+	var events []DownloadEvent
+	client := &Client{
+		HTTP: httpClient,
+		DownloadBases: []string{
+			"https://slow.test/{version}",
+			"https://fallback.test/{version}",
+		},
+		GOOS: "linux", GOARCH: "amd64",
+		OnDownload: func(event DownloadEvent) { events = append(events, event) },
+	}
+	target := filepath.Join(t.TempDir(), "beeapi")
+	if err := os.WriteFile(target, []byte("old"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	result, err := client.Install(context.Background(), Release{TagName: "v1.2.3"}, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Source, "fallback.test") {
+		t.Fatalf("fallback source = %q", result.Source)
+	}
+	var reportedFailure, reportedProgress, reportedVerified bool
+	for _, event := range events {
+		switch {
+		case event.Status == DownloadFailed && event.Source == "slow.test" && event.WillRetry && strings.Contains(event.Error, "simulated timeout"):
+			reportedFailure = true
+		case event.Status == DownloadProgress && event.Source == "fallback.test":
+			reportedProgress = true
+		case event.Status == DownloadVerified && event.Source == "fallback.test":
+			reportedVerified = true
+		}
+	}
+	if !reportedFailure || !reportedProgress || !reportedVerified {
+		t.Fatalf("missing download lifecycle events: %#v", events)
+	}
+}
+
+func TestInstallFailureNamesEveryAttemptedSource(t *testing.T) {
+	httpClient := &http.Client{Transport: updaterRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		return nil, fmt.Errorf("cannot reach %s", request.URL.Host)
+	})}
+	client := &Client{
+		HTTP: httpClient,
+		DownloadBases: []string{
+			"https://getbeeapi.test/{version}",
+			"https://github.test/{version}",
+		},
+		GOOS: "linux", GOARCH: "amd64",
+	}
+	target := filepath.Join(t.TempDir(), "beeapi")
+	if err := os.WriteFile(target, []byte("old"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, err := client.Install(context.Background(), Release{TagName: "v1.2.3"}, target)
+	if err == nil {
+		t.Fatal("install unexpectedly succeeded")
+	}
+	for _, source := range []string{"getbeeapi.test", "github.test"} {
+		if !strings.Contains(err.Error(), source) {
+			t.Fatalf("aggregate error is missing %s: %v", source, err)
+		}
 	}
 }
 
