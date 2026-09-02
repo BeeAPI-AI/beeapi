@@ -16,11 +16,24 @@ func characterDevice(value any) bool {
 	return err == nil && info.Mode()&os.ModeCharDevice != 0
 }
 
-func (r *runner) interactiveScreenEnabled() bool {
-	if r == nil || strings.TrimSpace(os.Getenv("GETBEE_NO_CLEAR")) != "" || strings.EqualFold(strings.TrimSpace(os.Getenv("TERM")), "dumb") {
+func (r *runner) interactiveTerminal() bool {
+	if r == nil {
 		return false
 	}
+	if r.interactive != nil {
+		return r.interactive()
+	}
 	return characterDevice(r.in) && characterDevice(r.out)
+}
+
+func (r *runner) interactiveScreenEnabled() bool {
+	if strings.TrimSpace(os.Getenv("GETBEE_NO_CLEAR")) != "" {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("TERM")), "dumb") {
+		return false
+	}
+	return r.interactiveTerminal()
 }
 
 func (r *runner) redrawInteractiveScreen() {

@@ -11,7 +11,10 @@ import (
 	"github.com/BeeAPI-AI/beeapi/internal/updater"
 )
 
-const updateCheckInterval = 24 * time.Hour
+const (
+	startupUpdateTimeout = 3 * time.Second
+	updateNoticeInterval = 24 * time.Hour
+)
 
 func (r *runner) updaterClient() *updater.Client {
 	if r.updateClient != nil {
@@ -20,35 +23,115 @@ func (r *runner) updaterClient() *updater.Client {
 	return updater.DefaultClient()
 }
 
-func (r *runner) notifyUpdateIfAvailable() {
+func (r *runner) startupUpdateRelease() (updater.Release, bool) {
 	if !versionCanCheck(r.version) || r.store == nil {
-		return
+		return updater.Release{}, false
 	}
 	now := time.Now().UTC()
-	status, err := r.store.LoadUpdateStatus()
-	if err != nil {
-		return
+	status, _ := r.store.LoadUpdateStatus()
+	baseCtx := r.ctx
+	if baseCtx == nil {
+		baseCtx = context.Background()
 	}
-	if status.CheckedAt.IsZero() || now.Sub(status.CheckedAt) >= updateCheckInterval {
-		ctx, cancel := context.WithTimeout(r.ctx, 2500*time.Millisecond)
-		release, checkErr := r.updaterClient().Latest(ctx)
-		cancel()
+	ctx, cancel := context.WithTimeout(baseCtx, startupUpdateTimeout)
+	release, err := r.updaterClient().Latest(ctx)
+	cancel()
+	if err == nil {
 		status.CheckedAt = now
-		if checkErr == nil {
-			status.LatestVersion = release.TagName
-		}
+		status.LatestVersion = release.TagName
 		_ = r.store.SaveUpdateStatus(status)
+	} else {
+		release.TagName = status.LatestVersion
 	}
-	if !updater.IsNewer(status.LatestVersion, r.version) {
+	if !updater.IsNewer(release.TagName, r.version) {
+		return updater.Release{}, false
+	}
+	return release, true
+}
+
+func (r *runner) markUpdateNotified(version string) {
+	if r.store == nil {
 		return
 	}
-	if status.NotifiedVersion == status.LatestVersion && !status.NotifiedAt.IsZero() && now.Sub(status.NotifiedAt) < updateCheckInterval {
-		return
-	}
-	r.format(r.out, "\n  有新版本 %s 可用（当前 %s）；运行 beeapi update 更新。\n", "\n  Version %s is available (current %s). Run beeapi update to install it.\n", status.LatestVersion, r.version)
-	status.NotifiedVersion = status.LatestVersion
-	status.NotifiedAt = now
+	status, _ := r.store.LoadUpdateStatus()
+	status.NotifiedVersion = strings.TrimSpace(version)
+	status.NotifiedAt = time.Now().UTC()
 	_ = r.store.SaveUpdateStatus(status)
+}
+
+func (r *runner) promptStartupUpdateIfAvailable() (bool, error) {
+	release, available := r.startupUpdateRelease()
+	if !available {
+		return false, nil
+	}
+	if !r.interactiveTerminal() {
+		status, _ := r.store.LoadUpdateStatus()
+		if status.NotifiedVersion != release.TagName || status.NotifiedAt.IsZero() || time.Since(status.NotifiedAt) >= updateNoticeInterval {
+			r.format(r.out, "\n  有新版本 %s 可用（当前 %s）；运行 beeapi update 更新。\n", "\n  Version %s is available (current %s). Run beeapi update to install it.\n", release.TagName, r.version)
+			r.markUpdateNotified(release.TagName)
+		}
+		return false, nil
+	}
+
+	r.showLogo()
+	r.format(r.out, "\n发现新版本 %s（当前 %s）。\n", "\nVersion %s is available (current %s).\n", release.TagName, r.version)
+	for {
+		answer, err := r.askLocalized("现在更新？[Y/n]: ", "Update now? [Y/n]: ")
+		if err != nil {
+			return false, err
+		}
+		switch strings.ToLower(strings.TrimSpace(answer)) {
+		case "", "y", "yes":
+			target, targetErr := r.currentExecutableTarget()
+			if targetErr != nil {
+				return false, targetErr
+			}
+			r.format(r.out, "  当前程序: %s\n", "  Executable: %s\n", target)
+			r.format(r.out, "  正在下载 %s 并验证 SHA-256…\n", "  Downloading %s and verifying SHA-256…\n", release.TagName)
+			result, installErr := r.installUpdateRelease(release, target)
+			if installErr != nil {
+				return false, fmt.Errorf(r.text("安装更新失败: %w", "Install update: %w"), installErr)
+			}
+			r.saveSuccessfulUpdateCheck(result.Version)
+			r.printUpdateInstalled(result, target)
+			return true, nil
+		case "n", "no":
+			r.markUpdateNotified(release.TagName)
+			return false, nil
+		default:
+			r.line(r.errOut, "请输入 y 或 n。", "Enter y or n.")
+		}
+	}
+}
+
+func (r *runner) currentExecutableTarget() (string, error) {
+	executable := r.executablePath
+	if executable == nil {
+		executable = os.Executable
+	}
+	return executable()
+}
+
+func (r *runner) installUpdateRelease(release updater.Release, target string) (updater.Result, error) {
+	baseCtx := r.ctx
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(baseCtx, 5*time.Minute)
+	defer cancel()
+	if r.updateInstall != nil {
+		return r.updateInstall(ctx, release, target)
+	}
+	return r.updaterClient().Install(ctx, release, target)
+}
+
+func (r *runner) printUpdateInstalled(result updater.Result, target string) {
+	if result.Scheduled {
+		r.format(r.out, "  ✓ %s 已验证，后台将持续重试替换：%s\n", "  ✓ %s verified; background replacement will keep retrying: %s\n", result.Version, target)
+		r.line(r.out, "  CLI 现在将退出。请等待约 3 秒再运行 beeapi --version；无需关闭 PowerShell。", "  The CLI will exit now. Wait about 3 seconds before running beeapi --version; PowerShell can stay open.")
+		return
+	}
+	r.format(r.out, "  ✓ 已更新到 %s；请重新运行 beeapi。\n", "  ✓ Updated to %s. Run beeapi again.\n", result.Version)
 }
 
 func versionCanCheck(version string) bool {
@@ -70,7 +153,11 @@ func (r *runner) updateCLI(args []string) error {
 	}
 	r.showLogo()
 	r.format(r.out, "\n检查 BeeAPI CLI 更新 · 当前版本 %s\n", "\nCheck for BeeAPI CLI updates · Current version %s\n", r.version)
-	ctx, cancel := context.WithTimeout(r.ctx, 20*time.Second)
+	baseCtx := r.ctx
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(baseCtx, 20*time.Second)
 	release, err := r.updaterClient().Latest(ctx)
 	cancel()
 	if err != nil {
@@ -86,27 +173,18 @@ func (r *runner) updateCLI(args []string) error {
 		r.saveSuccessfulUpdateCheck(release.TagName)
 		return nil
 	}
-	r.format(r.out, "  正在下载 %s 并验证 SHA-256…\n", "  Downloading %s and verifying SHA-256…\n", release.TagName)
-	executable := r.executablePath
-	if executable == nil {
-		executable = os.Executable
-	}
-	target, err := executable()
+	target, err := r.currentExecutableTarget()
 	if err != nil {
 		return err
 	}
-	installCtx, installCancel := context.WithTimeout(r.ctx, 5*time.Minute)
-	result, err := r.updaterClient().Install(installCtx, release, target)
-	installCancel()
+	r.format(r.out, "  当前程序: %s\n", "  Executable: %s\n", target)
+	r.format(r.out, "  正在下载 %s 并验证 SHA-256…\n", "  Downloading %s and verifying SHA-256…\n", release.TagName)
+	result, err := r.installUpdateRelease(release, target)
 	if err != nil {
 		return fmt.Errorf(r.text("安装更新失败: %w", "Install update: %w"), err)
 	}
 	r.saveSuccessfulUpdateCheck(result.Version)
-	if result.Scheduled {
-		r.format(r.out, "  ✓ %s 已验证；退出后将完成替换，请重新打开终端。\n", "  ✓ %s was verified. Replacement will finish after this process exits; reopen your terminal.\n", result.Version)
-	} else {
-		r.format(r.out, "  ✓ 已更新到 %s；重新运行 beeapi 即可使用。\n", "  ✓ Updated to %s. Run beeapi again to use it.\n", result.Version)
-	}
+	r.printUpdateInstalled(result, target)
 	return nil
 }
 

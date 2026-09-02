@@ -5,6 +5,9 @@ on:
     branches: ["main"]
     paths:
       - "public/install.ps1"
+      - "internal/updater/**"
+      - "internal/app/update.go"
+      - "internal/app/update_test.go"
       - ".github/workflows/installer-smoke.yml"
   workflow_dispatch:
 
@@ -17,6 +20,12 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.x"
+      - name: Exercise locked-executable replacement
+        shell: powershell
+        run: go test -buildvcs=false ./internal/updater
       - name: Install with Windows PowerShell 5.1
         shell: powershell
         run: |

@@ -40,7 +40,9 @@ type runner struct {
 	usageLookup    usageLookupFunc
 	usageCache     usageCacheStore
 	updateClient   *updater.Client
+	updateInstall  func(context.Context, updater.Release, string) (updater.Result, error)
 	executablePath func() (string, error)
+	interactive    func() bool
 }
 
 type credentialMaterial struct {
@@ -95,7 +97,13 @@ func Run(ctx context.Context, args []string, version string, in io.Reader, out, 
 		}
 	}
 	if len(args) == 0 {
-		r.notifyUpdateIfAvailable()
+		exitAfterUpdate, updateErr := r.promptStartupUpdateIfAvailable()
+		if updateErr != nil {
+			return updateErr
+		}
+		if exitAfterUpdate {
+			return nil
+		}
 		if !cfg.Initialized() {
 			return r.setupWithRecovery(nil)
 		}
