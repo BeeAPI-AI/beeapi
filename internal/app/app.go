@@ -795,7 +795,7 @@ func (r *runner) pasteAPIKey(endpoint string) ([]credentialMaterial, error) {
 	if secret == "" {
 		return nil, errors.New(r.text("API Key 不能为空", "API Key is required"))
 	}
-	return []credentialMaterial{{ID: "manual", Name: r.text("手动 API Key", "Manual API Key"), Prefix: safeKeyPrefix(secret), Secret: secret}}, nil
+	return []credentialMaterial{{ID: stableCredentialID(secret), Name: r.text("手动 API Key", "Manual API Key"), Prefix: safeKeyPrefix(secret), Secret: secret}}, nil
 }
 
 func stableCredentialID(secret string) string {

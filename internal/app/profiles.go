@@ -321,7 +321,164 @@ func (r *runner) selectAgentsForProfile(environments []environment, defaults []s
 	return parseAgents(strings.Join(names, ","))
 }
 
-func (r *runner) collectProfileSelections(cfg state.Config, base *state.Profile, name string) (state.Profile, error) {
+func newProfileAgentDefaults(environments []environment, configured []string) []string {
+	configuredSet := make(map[string]bool, len(configured))
+	for _, agent := range configured {
+		configuredSet[agent] = true
+	}
+	var defaults []string
+	for _, item := range environments {
+		if item.Detected && !configuredSet[item.Agent] {
+			defaults = append(defaults, item.Agent)
+		}
+	}
+	if len(defaults) > 0 {
+		return defaults
+	}
+	preferred := []string{"claude", "codex", "opencode"}
+	for _, agent := range preferred {
+		if !configuredSet[agent] {
+			defaults = append(defaults, agent)
+		}
+	}
+	if len(defaults) > 0 {
+		return defaults
+	}
+	return append([]string(nil), configured...)
+}
+
+func credentialsForMerge(cfg state.Config) []state.Credential {
+	credentials := append([]state.Credential(nil), cfg.Credentials...)
+	if strings.TrimSpace(cfg.CredentialBackend) == "" {
+		return credentials
+	}
+	for _, credential := range credentials {
+		if credential.ID == "default" {
+			return credentials
+		}
+	}
+	name := strings.TrimSpace(cfg.KeyName)
+	if name == "" {
+		name = "Legacy default configuration"
+	}
+	return append(credentials, state.Credential{
+		ID: "default", Name: name, Backend: cfg.CredentialBackend,
+	})
+}
+
+func mergeStoredCredentials(cfg state.Config, incoming []state.Credential) []state.Credential {
+	merged := credentialsForMerge(cfg)
+	indexByID := make(map[string]int, len(merged)+len(incoming))
+	for index, credential := range merged {
+		indexByID[credential.ID] = index
+	}
+	for _, credential := range incoming {
+		if index, ok := indexByID[credential.ID]; ok {
+			merged[index] = credential
+			continue
+		}
+		indexByID[credential.ID] = len(merged)
+		merged = append(merged, credential)
+	}
+	return merged
+}
+
+func mergeCredentialMaterials(existing, incoming []credentialMaterial) []credentialMaterial {
+	merged := append([]credentialMaterial(nil), existing...)
+	indexByID := make(map[string]int, len(merged)+len(incoming))
+	for index, credential := range merged {
+		indexByID[credential.ID] = index
+	}
+	for _, credential := range incoming {
+		if index, ok := indexByID[credential.ID]; ok {
+			merged[index] = credential
+			continue
+		}
+		indexByID[credential.ID] = len(merged)
+		merged = append(merged, credential)
+	}
+	return merged
+}
+
+func (r *runner) acquireAdditionalProfileCredentials(cfg *state.Config, endpoint string, local []credentialMaterial) ([]credentialMaterial, error) {
+	pending, resumePending, err := r.pendingSetupForMode(pendingModeProfile, false)
+	if err != nil {
+		return nil, err
+	}
+	var incoming []credentialMaterial
+	var stored []state.Credential
+	if resumePending {
+		if beeapi.NormalizeBaseURL(pending.Endpoint) != beeapi.NormalizeBaseURL(endpoint) {
+			return nil, errors.New(r.text("上次未完成的 Key 领取属于另一个 BeeAPI 入口，请选择该入口继续或重新授权", "The unfinished API Key export belongs to another BeeAPI endpoint; select that endpoint to resume or authorize again"))
+		}
+		incoming, err = r.restorePendingCredentialMaterials(pending)
+		stored = pending.Credentials
+	} else {
+		var authorized authorizationResult
+		authorized, err = r.authorize(endpoint, false, pendingModeProfile)
+		incoming, stored = authorized.Credentials, authorized.Stored
+		if err == nil && len(stored) == 0 {
+			stored, err = r.checkpointCredentialMaterials(pendingModeProfile, endpoint, incoming)
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	usable, err := r.discoverCredentialModels(endpoint, mergeCredentialMaterials(local, incoming))
+	if err != nil {
+		r.updatePendingSetup(pendingModeProfile, endpoint, stored, err)
+		return nil, err
+	}
+	cfg.Credentials = mergeStoredCredentials(*cfg, stored)
+	cfg.CredentialBackend = ""
+	cfg.KeyName = credentialSummaryName(cfg.Credentials, r.language)
+	if err := r.store.SaveConfig(*cfg); err != nil {
+		r.updatePendingSetup(pendingModeProfile, endpoint, stored, err)
+		return nil, err
+	}
+	if err := r.store.ClearPendingSetup(); err != nil {
+		r.format(r.errOut, "  警告：清理设置续接点失败：%v\n", "  Warning: could not clear the setup checkpoint: %v\n", err)
+	}
+	r.clearUsageCache()
+	r.format(r.out, "  ✓ 新 Key 已与本机配置合并；现在共有 %d 个可用 API Key。\n", "  ✓ New Keys were merged with local configuration; %d usable API Key(s) are now available.\n", len(usable))
+	return usable, nil
+}
+
+func (r *runner) printProfileConfigurationContext(name, endpoint string, agents []string) {
+	r.format(r.out, "\n配置方案 · %s\n", "\nProfile · %s\n", name)
+	r.format(r.out, "  工具    %s\n", "  Tools     %s\n", friendlyAgentList(agents))
+	r.format(r.out, "  入口    %s\n", "  Endpoint  %s\n", endpoint)
+}
+
+func (r *runner) selectProfileCredentials(cfg *state.Config, endpoint, profileName string, agents []string) ([]credentialMaterial, error) {
+	local, err := r.loadCredentialMaterialsAt(*cfg, endpoint, false)
+	if err != nil {
+		return nil, err
+	}
+	r.line(r.out, "\n选择 API Key 来源", "\nChoose an API Key source")
+	r.format(r.out, "  1. 使用本机已保存的 Key（%d 个）\n", "  1. Use API Keys already saved on this computer (%d)\n", len(local))
+	r.line(r.out, "  2. 从 BeeAPI 账户领取其他 Key（与本机 Key 合并）", "  2. Export other Keys from the BeeAPI account (merge with local Keys)")
+	for {
+		choice, askErr := r.askLocalized("请选择 [1]: ", "Select [1]: ")
+		if askErr != nil && !errors.Is(askErr, io.EOF) {
+			return nil, askErr
+		}
+		switch strings.TrimSpace(choice) {
+		case "", "1":
+			r.redrawInteractiveScreen()
+			r.printProfileConfigurationContext(profileName, endpoint, agents)
+			return r.discoverCredentialModels(endpoint, local)
+		case "2":
+			r.redrawInteractiveScreen()
+			r.printProfileConfigurationContext(profileName, endpoint, agents)
+			return r.acquireAdditionalProfileCredentials(cfg, endpoint, local)
+		default:
+			r.line(r.errOut, "  请输入 1 或 2。", "  Enter 1 or 2.")
+		}
+	}
+}
+
+func (r *runner) collectProfileSelections(cfg *state.Config, base *state.Profile, name string) (state.Profile, error) {
 	currentEndpoint := cfg.Endpoint
 	var defaults []string
 	var existingAssignments, existingModels map[string]string
@@ -330,14 +487,8 @@ func (r *runner) collectProfileSelections(cfg state.Config, base *state.Profile,
 		defaults = append([]string(nil), base.Agents...)
 		existingAssignments = base.AgentCredentials
 		existingModels = base.Models
-	} else if len(cfg.Agents) > 0 {
-		defaults = append([]string(nil), cfg.Agents...)
 	}
 	endpoint, err := r.selectProfileEndpoint(currentEndpoint)
-	if err != nil {
-		return state.Profile{}, err
-	}
-	credentials, err := r.loadCredentialMaterialsAt(cfg, endpoint, true)
 	if err != nil {
 		return state.Profile{}, err
 	}
@@ -345,8 +496,15 @@ func (r *runner) collectProfileSelections(cfg state.Config, base *state.Profile,
 	if err != nil {
 		return state.Profile{}, err
 	}
+	if base == nil {
+		defaults = newProfileAgentDefaults(environments, cfg.Agents)
+	}
 	r.printEnvironments(environments)
 	agents, err := r.selectAgentsForProfile(environments, defaults)
+	if err != nil {
+		return state.Profile{}, err
+	}
+	credentials, err := r.selectProfileCredentials(cfg, endpoint, name, agents)
 	if err != nil {
 		return state.Profile{}, err
 	}
@@ -569,7 +727,7 @@ func (r *runner) createProfileInteractive() error {
 	if err != nil || name == "" {
 		return err
 	}
-	profile, err := r.collectProfileSelections(cfg, nil, name)
+	profile, err := r.collectProfileSelections(&cfg, nil, name)
 	if err != nil {
 		return err
 	}
@@ -717,7 +875,7 @@ func (r *runner) editProfileInteractive() error {
 		profile = selected
 	}
 	r.format(r.out, "\n编辑配置方案 · %s\n", "\nEdit profile · %s\n", profile.Name)
-	updated, err := r.collectProfileSelections(cfg, &profile, profile.Name)
+	updated, err := r.collectProfileSelections(&cfg, &profile, profile.Name)
 	if err != nil {
 		return err
 	}

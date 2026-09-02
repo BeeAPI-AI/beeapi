@@ -268,6 +268,7 @@ func (r *runner) balanceMenu() error {
 		return askErr
 	}
 	if strings.EqualFold(strings.TrimSpace(answer), "r") {
+		r.redrawInteractiveScreen()
 		return r.balanceMenu()
 	}
 	return nil

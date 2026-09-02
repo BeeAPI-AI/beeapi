@@ -131,3 +131,67 @@ func TestManageProfilesRefusesToDeleteActiveProfile(t *testing.T) {
 		t.Fatalf("unexpected active-profile deletion result: %v\n%s", err, output.String())
 	}
 }
+
+func TestMergeStoredCredentialsKeepsExistingKeysAndUpdatesDuplicates(t *testing.T) {
+	cfg := state.Config{Credentials: []state.Credential{
+		{ID: "key-xai", Name: "Xai-Heavy号池 Key", Prefix: "sk-xai", Backend: "protected-file"},
+	}}
+	merged := mergeStoredCredentials(cfg, []state.Credential{
+		{ID: "key-2k", Name: "2K-Plus Key", Prefix: "sk-2k", Backend: "protected-file"},
+	})
+	if len(merged) != 2 || merged[0].ID != "key-xai" || merged[1].ID != "key-2k" {
+		t.Fatalf("new Key replaced an existing Key instead of being merged: %#v", merged)
+	}
+	updated := mergeStoredCredentials(state.Config{Credentials: merged}, []state.Credential{
+		{ID: "key-xai", Name: "Xai Updated", Prefix: "sk-new", Backend: "keyring"},
+	})
+	if len(updated) != 2 || updated[0].Name != "Xai Updated" || updated[1].ID != "key-2k" {
+		t.Fatalf("duplicate Key metadata was not updated in place: %#v", updated)
+	}
+}
+
+func TestMergeStoredCredentialsPreservesLegacyDefaultKey(t *testing.T) {
+	merged := mergeStoredCredentials(state.Config{
+		KeyName: "旧 Key", CredentialBackend: "protected-file",
+	}, []state.Credential{{ID: "key-new", Name: "New Key", Backend: "keyring"}})
+	if len(merged) != 2 || merged[0].ID != "default" || merged[0].Backend != "protected-file" || merged[1].ID != "key-new" {
+		t.Fatalf("legacy credential was not retained during migration: %#v", merged)
+	}
+}
+
+func TestNewProfileDefaultsToDetectedUnconfiguredTools(t *testing.T) {
+	environments := []environment{
+		{Agent: "codex", Detected: true},
+		{Agent: "gemini", Detected: true},
+		{Agent: "grok", Detected: true},
+		{Agent: "opencode", Detected: true},
+	}
+	defaults := newProfileAgentDefaults(environments, []string{"grok"})
+	if strings.Join(defaults, ",") != "codex,gemini,opencode" {
+		t.Fatalf("new profile still defaulted to the already configured Grok tool: %v", defaults)
+	}
+}
+
+func TestActivatingNewToolProfileKeepsExistingGrokConfiguration(t *testing.T) {
+	cfg := state.Config{
+		Endpoint:         "https://beeapi.ai",
+		Agents:           []string{"grok"},
+		Models:           map[string]string{"grok": "grok-4.6"},
+		AgentCredentials: map[string]string{"grok": "key-xai"},
+		AgentEndpoints:   map[string]string{"grok": "https://beeapi.ai"},
+		ActiveProfiles:   map[string]string{"grok": "grok-profile"},
+	}
+	activateProfileFields(&cfg, state.Profile{
+		ID: "codex-profile", Endpoint: "https://beeapi.dev", Agents: []string{"codex"},
+		Models: map[string]string{"codex": "gpt-5.6-sol"}, AgentCredentials: map[string]string{"codex": "key-2k"},
+	})
+	if strings.Join(cfg.Agents, ",") != "grok,codex" {
+		t.Fatalf("adding Codex replaced the existing Grok tool: %v", cfg.Agents)
+	}
+	if cfg.AgentCredentials["grok"] != "key-xai" || cfg.Models["grok"] != "grok-4.6" {
+		t.Fatalf("existing Grok configuration changed: %#v %#v", cfg.AgentCredentials, cfg.Models)
+	}
+	if cfg.AgentCredentials["codex"] != "key-2k" || cfg.Models["codex"] != "gpt-5.6-sol" {
+		t.Fatalf("new Codex configuration was not activated: %#v %#v", cfg.AgentCredentials, cfg.Models)
+	}
+}

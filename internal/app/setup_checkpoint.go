@@ -14,6 +14,7 @@ import (
 const (
 	pendingModeSetup     = "setup"
 	pendingModeReconnect = "reconnect"
+	pendingModeProfile   = "profile"
 )
 
 func (r *runner) pendingSetupForMode(mode string, automatic bool) (state.PendingSetup, bool, error) {
