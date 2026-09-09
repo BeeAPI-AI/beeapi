@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/BeeAPI-AI/beeapi/internal/beeapi"
 	"github.com/BeeAPI-AI/beeapi/internal/configurator"
+	"github.com/BeeAPI-AI/beeapi/internal/reasoning"
 	"github.com/BeeAPI-AI/beeapi/internal/state"
 )
 
@@ -36,16 +38,17 @@ func profileFromCurrent(cfg state.Config, id, name string, now time.Time) state.
 		endpoint = cfg.Endpoint
 	}
 	return state.Profile{
-		ID:               id,
-		Name:             name,
-		Endpoint:         endpoint,
-		DefaultModel:     cfg.DefaultModel,
-		Models:           cloneStringMap(cfg.Models),
-		ReasoningEfforts: cloneStringMap(cfg.ReasoningEfforts),
-		Agents:           append([]string(nil), cfg.Agents...),
-		AgentCredentials: cloneStringMap(cfg.AgentCredentials),
-		CreatedAt:        now,
-		UpdatedAt:        now,
+		ID:                  id,
+		Name:                name,
+		Endpoint:            endpoint,
+		DefaultModel:        cfg.DefaultModel,
+		Models:              cloneStringMap(cfg.Models),
+		ReasoningEfforts:    cloneStringMap(cfg.ReasoningEfforts),
+		ReasoningSelections: reasoning.Clone(cfg.ReasoningSelections),
+		Agents:              append([]string(nil), cfg.Agents...),
+		AgentCredentials:    cloneStringMap(cfg.AgentCredentials),
+		CreatedAt:           now,
+		UpdatedAt:           now,
 	}
 }
 
@@ -531,15 +534,16 @@ func (r *runner) collectProfileSelections(cfg *state.Config, base *state.Profile
 	}
 	now := time.Now().UTC()
 	profile := state.Profile{
-		ID:               nextProfileID(name, cfg.Profiles),
-		Name:             name,
-		Endpoint:         endpoint,
-		Models:           models,
-		ReasoningEfforts: reasoningEfforts,
-		Agents:           agents,
-		AgentCredentials: assignments,
-		CreatedAt:        now,
-		UpdatedAt:        now,
+		ID:                  nextProfileID(name, cfg.Profiles),
+		Name:                name,
+		Endpoint:            endpoint,
+		Models:              models,
+		ReasoningEfforts:    reasoningEfforts,
+		ReasoningSelections: reasoningSelections(agents, credentials, assignments, models),
+		Agents:              agents,
+		AgentCredentials:    assignments,
+		CreatedAt:           now,
+		UpdatedAt:           now,
 	}
 	setProfileDefaultModel(&profile)
 	if base != nil {
@@ -602,6 +606,9 @@ func activateProfileFields(cfg *state.Config, profile state.Profile) {
 	if cfg.ReasoningEfforts == nil {
 		cfg.ReasoningEfforts = map[string]string{}
 	}
+	if cfg.ReasoningSelections == nil {
+		cfg.ReasoningSelections = map[string]reasoning.Selection{}
+	}
 	if cfg.AgentCredentials == nil {
 		cfg.AgentCredentials = map[string]string{}
 	}
@@ -618,6 +625,11 @@ func activateProfileFields(cfg *state.Config, profile state.Profile) {
 			cfg.ReasoningEfforts[agent] = effort
 		} else {
 			delete(cfg.ReasoningEfforts, agent)
+		}
+		if _, ok := profile.ReasoningSelections[agent]; ok {
+			cfg.ReasoningSelections[agent] = reasoning.Clone(profile.ReasoningSelections)[agent]
+		} else {
+			delete(cfg.ReasoningSelections, agent)
 		}
 		cfg.AgentCredentials[agent] = profile.AgentCredentials[agent]
 		cfg.AgentEndpoints[agent] = profile.Endpoint
@@ -680,6 +692,9 @@ func syncActiveProfilesFromCurrent(cfg *state.Config) {
 		if profile.ReasoningEfforts == nil {
 			profile.ReasoningEfforts = map[string]string{}
 		}
+		if profile.ReasoningSelections == nil {
+			profile.ReasoningSelections = map[string]reasoning.Selection{}
+		}
 		if profile.AgentCredentials == nil {
 			profile.AgentCredentials = map[string]string{}
 		}
@@ -688,6 +703,11 @@ func syncActiveProfilesFromCurrent(cfg *state.Config) {
 			profile.ReasoningEfforts[agent] = effort
 		} else {
 			delete(profile.ReasoningEfforts, agent)
+		}
+		if _, ok := cfg.ReasoningSelections[agent]; ok {
+			profile.ReasoningSelections[agent] = reasoning.Clone(cfg.ReasoningSelections)[agent]
+		} else {
+			delete(profile.ReasoningSelections, agent)
 		}
 		profile.AgentCredentials[agent] = cfg.AgentCredentials[agent]
 		profile.UpdatedAt = now
@@ -715,7 +735,8 @@ func (r *runner) applyProfile(cfg *state.Config, profile state.Profile) (configu
 	}
 	result, err := configurator.Apply(r.store, configurator.Options{
 		Endpoint: profile.Endpoint, APIKeys: apiKeys, Models: profile.Models, ReasoningEfforts: profile.ReasoningEfforts,
-		Agents: profile.Agents, BinaryPath: binaryPath,
+		ReasoningSelections: profile.ReasoningSelections,
+		Agents:              profile.Agents, BinaryPath: binaryPath,
 	})
 	if err != nil {
 		return configurator.Result{}, err
@@ -827,6 +848,11 @@ func (r *runner) selectProfile(cfg state.Config, prompt string, allowCurrent boo
 
 func profileAlreadyApplied(cfg state.Config, profile state.Profile) bool {
 	for _, agent := range profile.Agents {
+		current, currentOK := cfg.ReasoningSelections[agent]
+		selected, selectedOK := profile.ReasoningSelections[agent]
+		if currentOK != selectedOK || !reflect.DeepEqual(current, selected) {
+			return false
+		}
 		if cfg.ActiveProfiles[agent] != profile.ID || cfg.Models[agent] != profile.Models[agent] || cfg.ReasoningEfforts[agent] != profile.ReasoningEfforts[agent] ||
 			cfg.AgentCredentials[agent] != profile.AgentCredentials[agent] || cfg.AgentEndpoints[agent] != profile.Endpoint {
 			return false

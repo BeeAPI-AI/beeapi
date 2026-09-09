@@ -8,49 +8,8 @@ import (
 	"strings"
 
 	"github.com/BeeAPI-AI/beeapi/internal/beeapi"
+	"github.com/BeeAPI-AI/beeapi/internal/reasoning"
 )
-
-type agentReasoningAdapter struct {
-	Values       []string
-	DefaultValue string
-}
-
-func reasoningAdapterForAgent(agent string) (agentReasoningAdapter, bool) {
-	switch agent {
-	case "claude":
-		return agentReasoningAdapter{
-			Values:       []string{"low", "medium", "high", "xhigh"},
-			DefaultValue: "high",
-		}, true
-	case "codex":
-		return agentReasoningAdapter{
-			Values:       []string{"minimal", "low", "medium", "high", "xhigh"},
-			DefaultValue: "medium",
-		}, true
-	case "gemini":
-		return agentReasoningAdapter{
-			Values:       []string{"minimal", "low", "medium", "high"},
-			DefaultValue: "medium",
-		}, true
-	case "grok":
-		return agentReasoningAdapter{
-			Values:       []string{"low", "medium", "high", "xhigh"},
-			DefaultValue: "high",
-		}, true
-	case "opencode":
-		return agentReasoningAdapter{
-			Values:       []string{"low", "medium", "high"},
-			DefaultValue: "medium",
-		}, true
-	case "openclaw", "hermes":
-		return agentReasoningAdapter{
-			Values:       []string{"minimal", "low", "medium", "high", "xhigh"},
-			DefaultValue: "medium",
-		}, true
-	default:
-		return agentReasoningAdapter{}, false
-	}
-}
 
 func credentialModelOptionForID(credential credentialMaterial, model string) (beeapi.ModelOption, bool) {
 	for _, option := range credential.ModelOptions {
@@ -70,14 +29,27 @@ func modelOptionHasCapability(option beeapi.ModelOption, capability string) bool
 	return false
 }
 
-func selectedModelSupportsReasoning(credential credentialMaterial, model string) bool {
+func selectionForModel(agent, model string, credential credentialMaterial) reasoning.Selection {
+	protocol := reasoning.Protocol(agent)
+	capability := reasoning.Fallback(model, protocol)
 	option, found := credentialModelOptionForID(credential, model)
-	if found {
-		return modelOptionHasCapability(option, "reasoning")
+	if found && option.Reasoning != nil {
+		// An explicit protocol map is authoritative, including missing entries.
+		capability = option.Reasoning[protocol]
+	} else if (found && !modelOptionHasCapability(option, "reasoning")) || (!found && credential.ModelOptionsAuthoritative) {
+		capability = reasoning.Capability{Mode: "none"}
 	}
-	// Legacy model discovery does not expose capabilities. Preserve the native
-	// tool option in that compatibility mode and let the target CLI validate it.
-	return !credential.ModelOptionsAuthoritative
+	return reasoning.Selection{Model: model, Protocol: protocol, Capability: reasoning.Normalize(protocol, capability)}
+}
+
+func reasoningSelections(agents []string, credentials []credentialMaterial, assignments, models map[string]string) map[string]reasoning.Selection {
+	selections := make(map[string]reasoning.Selection, len(agents))
+	for _, agent := range agents {
+		if credential, ok := credentialForID(credentials, assignments[agent]); ok {
+			selections[agent] = selectionForModel(agent, models[agent], credential)
+		}
+	}
+	return selections
 }
 
 func valueIndex(values []string, wanted string) int {
@@ -92,35 +64,55 @@ func valueIndex(values []string, wanted string) int {
 func (r *runner) selectReasoningEfforts(agents []string, credentials []credentialMaterial, assignments, models, existing map[string]string) (map[string]string, error) {
 	selected := map[string]string{}
 	for _, agent := range agents {
-		adapter, supported := reasoningAdapterForAgent(agent)
-		if !supported {
+		if !reasoning.SupportsAgent(agent) {
 			continue
 		}
 		credential, ok := credentialForID(credentials, assignments[agent])
 		if !ok {
 			return nil, fmt.Errorf(r.text("%s 没有可用的密钥配置", "%s has no usable API Key configuration"), agentLabel(agent))
 		}
-		if !selectedModelSupportsReasoning(credential, models[agent]) {
+		snapshot := selectionForModel(agent, models[agent], credential)
+		capability := reasoning.Resolve(agent, models[agent], &snapshot)
+		values := reasoning.Values(agent, capability)
+		if agent == "codex" && valueIndex(values, "max") >= 0 && !r.codexAcceptsMax() {
+			values = removeReasoningValue(values, "max")
+			r.line(r.out, "  本机 Codex 尚未确认支持 max 配置，已隐藏此档位；更新 Codex 后可重新选择。", "  This Codex runtime has not confirmed max support; the level is hidden. Update Codex and select it again.")
+		}
+		if len(values) == 0 {
+			r.format(r.out, "  %s · %s：未确认可设置的推理档位，使用工具/模型默认行为。\n", "  %s · %s: no verified reasoning control; using tool/model defaults.\n", agentLabel(agent), models[agent])
 			continue
 		}
 
-		defaultValue := adapter.DefaultValue
-		if valueIndex(adapter.Values, existing[agent]) >= 0 {
+		recommended := reasoning.Default(capability, values)
+		defaultValue := recommended
+		if valueIndex(values, existing[agent]) >= 0 {
 			defaultValue = strings.ToLower(strings.TrimSpace(existing[agent]))
+		} else if existing[agent] != "" {
+			r.format(r.out, "  之前的 %s 档位不适用于当前模型/工具，请重新选择。\n", "  The previous %s level is not valid for this model/tool; choose again.\n", existing[agent])
 		}
-		defaultIndex := valueIndex(adapter.Values, defaultValue)
+		defaultIndex := valueIndex(values, defaultValue)
 		if defaultIndex < 0 {
 			defaultIndex = 0
 		}
 
 		r.format(r.out, "\n  %s · %s · 选择思考等级\n", "\n  %s · %s · Choose reasoning effort\n", agentLabel(agent), models[agent])
-		for index, value := range adapter.Values {
+		if capability.Mode == "budget" {
+			r.line(r.out, "  此模型使用思考 Token 预算，以下为预算预设，不是 effort 档位。", "  This model uses thinking-token budgets; these are budget presets, not effort levels.")
+		}
+		for index, value := range values {
 			labels := make([]string, 0, 2)
 			if value == existing[agent] && existing[agent] != "" {
 				labels = append(labels, r.text("当前", "Current"))
 			}
-			if value == adapter.DefaultValue {
+			if value == recommended {
 				labels = append(labels, r.text("推荐", "Recommended"))
+			}
+			if capability.Mode == "budget" {
+				labels = append(labels, fmt.Sprintf("%d tokens", capability.Budgets[value]))
+			} else if value == "max" {
+				labels = append(labels, r.text("最高推理 · 耗时和用量更高", "Maximum reasoning · higher latency and usage"))
+			} else if len(capability.Efforts) > 0 && value == capability.Efforts[len(capability.Efforts)-1] {
+				labels = append(labels, r.text("此模型最高", "Model maximum"))
 			}
 			suffix := ""
 			if len(labels) > 0 {
@@ -128,22 +120,26 @@ func (r *runner) selectReasoningEfforts(agents []string, credentials []credentia
 			}
 			fmt.Fprintf(r.out, "    %d. %s%s\n", index+1, value, suffix)
 		}
+		r.line(r.out, "    0. 使用工具/模型默认行为（不设置推理档位）", "    0. Use tool/model defaults (no reasoning override)")
 		for {
 			answer, err := r.ask(fmt.Sprintf(r.text("    请选择思考等级 [%d]: ", "    Select reasoning effort [%d]: "), defaultIndex+1))
 			if err != nil && !errors.Is(err, io.EOF) {
 				return nil, err
 			}
 			answer = strings.TrimSpace(answer)
+			if answer == "0" || strings.EqualFold(answer, "auto") {
+				break
+			}
 			choice := defaultValue
 			if answer != "" {
 				if number, convErr := strconv.Atoi(answer); convErr == nil {
-					if number < 1 || number > len(adapter.Values) {
+					if number < 1 || number > len(values) {
 						r.line(r.errOut, "    思考等级编号无效，请重新选择。", "    Invalid reasoning effort number; try again.")
 						continue
 					}
-					choice = adapter.Values[number-1]
-				} else if index := valueIndex(adapter.Values, answer); index >= 0 {
-					choice = adapter.Values[index]
+					choice = values[number-1]
+				} else if index := valueIndex(values, answer); index >= 0 {
+					choice = values[index]
 				} else {
 					r.line(r.errOut, "    思考等级无效，请重新选择。", "    Invalid reasoning effort; try again.")
 					continue
@@ -158,4 +154,41 @@ func (r *runner) selectReasoningEfforts(agents []string, credentials []credentia
 		return nil, nil
 	}
 	return selected, nil
+}
+
+func removeReasoningValue(values []string, excluded string) []string {
+	filtered := make([]string, 0, len(values))
+	for _, value := range values {
+		if value != excluded {
+			filtered = append(filtered, value)
+		}
+	}
+	return filtered
+}
+
+func (r *runner) codexAcceptsMax() bool {
+	if r.codexMaxSupport != nil {
+		return r.codexMaxSupport()
+	}
+	return reasoning.CodexSupportsMax(r.ctx)
+}
+
+// Non-interactive reconfiguration may change the model or Key. Preserve only
+// still-valid explicit choices; never silently translate max to high.
+func (r *runner) retainedReasoningEfforts(agents []string, models, existing map[string]string, selections map[string]reasoning.Selection) map[string]string {
+	retained := map[string]string{}
+	for _, agent := range agents {
+		value := existing[agent]
+		if value == "" {
+			continue
+		}
+		snapshot := selections[agent]
+		values := reasoning.Values(agent, reasoning.Resolve(agent, models[agent], &snapshot))
+		if valueIndex(values, value) >= 0 && (agent != "codex" || value != "max" || r.codexAcceptsMax()) {
+			retained[agent] = value
+		} else {
+			r.format(r.out, "  %s 的原推理档位 %s 不适用于当前配置，已清除；可在编辑方案中重新选择。\n", "  %s's previous reasoning level %s is not valid for this configuration and was cleared; edit the configuration to select another.\n", agentLabel(agent), value)
+		}
+	}
+	return retained
 }

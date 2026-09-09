@@ -14,6 +14,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/BeeAPI-AI/beeapi/internal/reasoning"
 )
 
 const keyringService = "com.getbeeapi.cli"
@@ -35,37 +37,39 @@ type Credential struct {
 // unrelated settings such as MCP servers, permissions, themes, and plugins.
 // API keys are referenced by credential ID and are never copied into profiles.
 type Profile struct {
-	ID               string            `json:"id"`
-	Name             string            `json:"name"`
-	Endpoint         string            `json:"endpoint"`
-	DefaultModel     string            `json:"default_model,omitempty"`
-	Models           map[string]string `json:"models,omitempty"`
-	ReasoningEfforts map[string]string `json:"reasoning_efforts,omitempty"`
-	Agents           []string          `json:"agents,omitempty"`
-	AgentCredentials map[string]string `json:"agent_credentials,omitempty"`
-	CreatedAt        time.Time         `json:"created_at,omitempty"`
-	UpdatedAt        time.Time         `json:"updated_at,omitempty"`
+	ID                  string                         `json:"id"`
+	Name                string                         `json:"name"`
+	Endpoint            string                         `json:"endpoint"`
+	DefaultModel        string                         `json:"default_model,omitempty"`
+	Models              map[string]string              `json:"models,omitempty"`
+	ReasoningEfforts    map[string]string              `json:"reasoning_efforts,omitempty"`
+	ReasoningSelections map[string]reasoning.Selection `json:"reasoning_selections,omitempty"`
+	Agents              []string                       `json:"agents,omitempty"`
+	AgentCredentials    map[string]string              `json:"agent_credentials,omitempty"`
+	CreatedAt           time.Time                      `json:"created_at,omitempty"`
+	UpdatedAt           time.Time                      `json:"updated_at,omitempty"`
 }
 
 type Config struct {
-	SchemaVersion     int               `json:"schema_version,omitempty"`
-	Language          string            `json:"language,omitempty"`
-	Endpoint          string            `json:"endpoint"`
-	KeyName           string            `json:"key_name,omitempty"`
-	DefaultModel      string            `json:"default_model,omitempty"`
-	Models            map[string]string `json:"models,omitempty"`
-	ReasoningEfforts  map[string]string `json:"reasoning_efforts,omitempty"`
-	Agents            []string          `json:"agents,omitempty"`
-	Credentials       []Credential      `json:"credentials,omitempty"`
-	AgentCredentials  map[string]string `json:"agent_credentials,omitempty"`
-	AgentEndpoints    map[string]string `json:"agent_endpoints,omitempty"`
-	Profiles          []Profile         `json:"profiles,omitempty"`
-	ActiveProfile     string            `json:"active_profile,omitempty"`
-	ActiveProfiles    map[string]string `json:"active_profiles,omitempty"`
-	BinaryPath        string            `json:"binary_path,omitempty"`
-	CredentialBackend string            `json:"credential_backend,omitempty"`
-	InitializedAt     time.Time         `json:"initialized_at,omitempty"`
-	UpdatedAt         time.Time         `json:"updated_at"`
+	SchemaVersion       int                            `json:"schema_version,omitempty"`
+	Language            string                         `json:"language,omitempty"`
+	Endpoint            string                         `json:"endpoint"`
+	KeyName             string                         `json:"key_name,omitempty"`
+	DefaultModel        string                         `json:"default_model,omitempty"`
+	Models              map[string]string              `json:"models,omitempty"`
+	ReasoningEfforts    map[string]string              `json:"reasoning_efforts,omitempty"`
+	ReasoningSelections map[string]reasoning.Selection `json:"reasoning_selections,omitempty"`
+	Agents              []string                       `json:"agents,omitempty"`
+	Credentials         []Credential                   `json:"credentials,omitempty"`
+	AgentCredentials    map[string]string              `json:"agent_credentials,omitempty"`
+	AgentEndpoints      map[string]string              `json:"agent_endpoints,omitempty"`
+	Profiles            []Profile                      `json:"profiles,omitempty"`
+	ActiveProfile       string                         `json:"active_profile,omitempty"`
+	ActiveProfiles      map[string]string              `json:"active_profiles,omitempty"`
+	BinaryPath          string                         `json:"binary_path,omitempty"`
+	CredentialBackend   string                         `json:"credential_backend,omitempty"`
+	InitializedAt       time.Time                      `json:"initialized_at,omitempty"`
+	UpdatedAt           time.Time                      `json:"updated_at"`
 }
 
 // PendingSetup is a resumable checkpoint written immediately after BeeAPI

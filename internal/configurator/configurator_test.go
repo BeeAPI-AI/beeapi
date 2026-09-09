@@ -138,7 +138,7 @@ func TestApplyRejectsReasoningForUnsupportedTool(t *testing.T) {
 	t.Setenv("GETBEE_TARGET_HOME", filepath.Join(root, "home"))
 	_, err := Apply(&state.Store{Dir: filepath.Join(root, "state")}, Options{
 		Endpoint: "https://beeapi.dev", APIKey: "sk-secret", Agents: []string{"opencode"},
-		Models: map[string]string{"opencode": "gpt-5.6"}, ReasoningEfforts: map[string]string{"opencode": "xhigh"},
+		Models: map[string]string{"opencode": "gpt-5.6"}, ReasoningEfforts: map[string]string{"opencode": "ultra"},
 	})
 	if err == nil || !strings.Contains(err.Error(), "无效") {
 		t.Fatalf("unexpected reasoning validation result: %v", err)
@@ -158,7 +158,7 @@ func TestApplyWritesNativeReasoningSettingsForEverySupportedCLI(t *testing.T) {
 	}
 	efforts := map[string]string{
 		"claude": "high", "codex": "xhigh", "gemini": "low", "grok": "high",
-		"opencode": "medium", "openclaw": "xhigh", "hermes": "minimal",
+		"opencode": "medium", "openclaw": "xhigh", "hermes": "low",
 	}
 	if _, err := Apply(store, Options{
 		Endpoint: "https://beeapi.dev", APIKey: "sk-reasoning", Agents: agents,
@@ -190,7 +190,7 @@ func TestApplyWritesNativeReasoningSettingsForEverySupportedCLI(t *testing.T) {
 			`"thinkingDefault": "xhigh"`, `"supportedReasoningEfforts"`,
 		},
 		filepath.Join(home, ".hermes", "config.yaml"): {
-			`reasoning_effort: "minimal"`,
+			`reasoning_effort: "low"`,
 		},
 	}
 	for path, wanted := range checks {

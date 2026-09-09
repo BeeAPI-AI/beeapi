@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/BeeAPI-AI/beeapi/internal/reasoning"
 )
 
 const apiPrefix = "/api/v1"
@@ -533,13 +535,14 @@ func (c *Client) Usage(ctx context.Context, apiKey string) (Usage, error) {
 // It intentionally stays separate from the OpenAI-compatible /v1/models
 // response, whose schema cannot describe the wire protocols a route supports.
 type ModelOption struct {
-	ID                  string   `json:"id"`
-	Protocols           []string `json:"protocols"`
-	Capabilities        []string `json:"capabilities"`
-	RecommendedFor      []string `json:"recommended_for"`
-	Priority            int      `json:"priority"`
-	ContextWindowTokens *int     `json:"context_window_tokens,omitempty"`
-	MaxOutputTokens     *int     `json:"max_output_tokens,omitempty"`
+	ID                  string                          `json:"id"`
+	Protocols           []string                        `json:"protocols"`
+	Capabilities        []string                        `json:"capabilities"`
+	RecommendedFor      []string                        `json:"recommended_for"`
+	Priority            int                             `json:"priority"`
+	ContextWindowTokens *int                            `json:"context_window_tokens,omitempty"`
+	MaxOutputTokens     *int                            `json:"max_output_tokens,omitempty"`
+	Reasoning           map[string]reasoning.Capability `json:"reasoning,omitempty"`
 }
 
 func (c *Client) ModelOptions(ctx context.Context, apiKey string) ([]ModelOption, error) {

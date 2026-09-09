@@ -20,29 +20,31 @@ import (
 
 	"github.com/BeeAPI-AI/beeapi/internal/beeapi"
 	"github.com/BeeAPI-AI/beeapi/internal/configurator"
+	"github.com/BeeAPI-AI/beeapi/internal/reasoning"
 	"github.com/BeeAPI-AI/beeapi/internal/routeopt"
 	"github.com/BeeAPI-AI/beeapi/internal/state"
 	"github.com/BeeAPI-AI/beeapi/internal/updater"
 )
 
 type runner struct {
-	ctx            context.Context
-	version        string
-	language       string
-	in             io.Reader
-	reader         *bufio.Reader
-	out            io.Writer
-	errOut         io.Writer
-	store          *state.Store
-	logoShown      bool
-	optimize       func(string, bool, bool) (routeopt.Result, error)
-	openBrowser    func(string) error
-	usageLookup    usageLookupFunc
-	usageCache     usageCacheStore
-	updateClient   *updater.Client
-	updateInstall  func(context.Context, updater.Release, string) (updater.Result, error)
-	executablePath func() (string, error)
-	interactive    func() bool
+	ctx             context.Context
+	version         string
+	language        string
+	in              io.Reader
+	reader          *bufio.Reader
+	out             io.Writer
+	errOut          io.Writer
+	store           *state.Store
+	logoShown       bool
+	optimize        func(string, bool, bool) (routeopt.Result, error)
+	openBrowser     func(string) error
+	usageLookup     usageLookupFunc
+	usageCache      usageCacheStore
+	updateClient    *updater.Client
+	updateInstall   func(context.Context, updater.Release, string) (updater.Result, error)
+	executablePath  func() (string, error)
+	interactive     func() bool
+	codexMaxSupport func() bool
 }
 
 type credentialMaterial struct {
@@ -1335,18 +1337,7 @@ func agentRecommendationTags(agent string) []string {
 }
 
 func agentProtocol(agent string) string {
-	switch agent {
-	case "claude", "claude-desktop":
-		return "anthropic/messages"
-	case "codex", "grok", "openclaw":
-		return "openai/responses"
-	case "gemini":
-		return "gemini/contents"
-	case "opencode", "hermes":
-		return "openai/chat_completions"
-	default:
-		return ""
-	}
+	return reasoning.Protocol(agent)
 }
 
 func agentProtocolLabel(agent string) string {
@@ -1455,13 +1446,16 @@ func (r *runner) configure(args []string) error {
 	if err != nil {
 		return err
 	}
+	selections := reasoningSelections(agents, credentials, assignments, models)
+	efforts := r.retainedReasoningEfforts(agents, models, cfg.ReasoningEfforts, selections)
 	result, err := configurator.Apply(r.store, configurator.Options{
-		Endpoint: cfg.Endpoint, APIKeys: apiKeys, Models: models, ReasoningEfforts: cfg.ReasoningEfforts, Agents: agents, BinaryPath: cfg.BinaryPath,
+		Endpoint: cfg.Endpoint, APIKeys: apiKeys, Models: models, ReasoningEfforts: efforts, ReasoningSelections: selections, Agents: agents, BinaryPath: cfg.BinaryPath,
 	})
 	if err != nil {
 		return err
 	}
 	cfg.Agents, cfg.Models, cfg.AgentCredentials = agents, models, assignments
+	cfg.ReasoningEfforts, cfg.ReasoningSelections = efforts, selections
 	setDefaultModel(&cfg, agents, models)
 	syncCurrentProfile(&cfg)
 	if err := r.store.SaveConfig(cfg); err != nil {

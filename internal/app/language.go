@@ -102,6 +102,7 @@ func (r *runner) localizedErrorMessage(err error) string {
 		return message
 	}
 	exact := map[string]string{
+		"本机 Codex 尚未确认支持 max 配置，请更新 Codex 或编辑方案选择其他档位": "This Codex runtime has not confirmed max support; update Codex or edit the configuration to choose another level",
 		"没有可用模型":            "No available models",
 		"模型协议元数据不完整":        "Model protocol metadata is incomplete",
 		"API Key 为空":        "API Key is empty",
@@ -124,6 +125,12 @@ func (r *runner) localizedErrorMessage(err error) string {
 	message = strings.ReplaceAll(message, "没有对应的本地凭据", "has no matching local credential")
 	message = strings.ReplaceAll(message, "尚未选择 API Key", "has no selected API Key")
 	message = strings.ReplaceAll(message, "尚未选择模型", "has no selected model")
+	if strings.Contains(message, " 的思考等级 ") {
+		message = strings.ReplaceAll(message, " 模型 ", " model ")
+		message = strings.ReplaceAll(message, " 的思考等级 ", " reasoning effort ")
+		message = strings.ReplaceAll(message, " 无效，请编辑方案重新选择", " is invalid; edit the configuration to choose again")
+	}
+	message = strings.ReplaceAll(message, " 不支持由 GetBeeAPI 写入思考等级", " does not support configuring reasoning effort through GetBeeAPI")
 	return message
 }
 

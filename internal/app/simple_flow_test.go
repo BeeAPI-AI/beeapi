@@ -60,30 +60,30 @@ func TestSelectSingleAgentRejectsMultiToolInput(t *testing.T) {
 }
 
 func TestReasoningSelectionUsesEachToolsNativeAdapter(t *testing.T) {
-	credential := credentialMaterial{
-		ID: "reasoning-key", ModelOptionsAuthoritative: true,
-		ModelOptions: []beeapi.ModelOption{{ID: "gpt-5.6-sol", Capabilities: []string{"reasoning"}}},
-	}
 	for _, test := range []struct {
 		agent string
+		model string
 		input string
 		want  string
 	}{
-		{agent: "claude", input: "3\n", want: "high"},
-		{agent: "codex", input: "4\n", want: "high"},
-		{agent: "gemini", input: "2\n", want: "low"},
-		{agent: "grok", input: "4\n", want: "xhigh"},
-		{agent: "opencode", input: "3\n", want: "high"},
-		{agent: "openclaw", input: "5\n", want: "xhigh"},
-		{agent: "hermes", input: "1\n", want: "minimal"},
+		{agent: "claude", model: "claude-opus-4-6", input: "max\n", want: "max"},
+		{agent: "codex", model: "gpt-5.6-sol", input: "max\n", want: "max"},
+		{agent: "gemini", model: "gemini-3.1-pro-preview", input: "1\n", want: "low"},
+		{agent: "grok", model: "grok-4.6", input: "4\n", want: "xhigh"},
+		{agent: "opencode", model: "deepseek-v4-pro", input: "3\n", want: "max"},
+		{agent: "openclaw", model: "gpt-5.6-sol", input: "max\n", want: "max"},
+		{agent: "hermes", model: "kimi-k3", input: "max\n", want: "max"},
 	} {
 		t.Run(test.agent, func(t *testing.T) {
+			credential := credentialMaterial{ID: "reasoning-key", ModelOptionsAuthoritative: true,
+				ModelOptions: []beeapi.ModelOption{{ID: test.model, Capabilities: []string{"reasoning"}}}}
 			input := strings.NewReader(test.input)
 			var output bytes.Buffer
 			r := &runner{in: input, reader: bufio.NewReader(input), out: &output, errOut: &output}
+			r.codexMaxSupport = func() bool { return true }
 			selected, err := r.selectReasoningEfforts(
 				[]string{test.agent}, []credentialMaterial{credential},
-				map[string]string{test.agent: "reasoning-key"}, map[string]string{test.agent: "gpt-5.6-sol"}, nil,
+				map[string]string{test.agent: "reasoning-key"}, map[string]string{test.agent: test.model}, nil,
 			)
 			if err != nil {
 				t.Fatal(err)
@@ -91,13 +91,14 @@ func TestReasoningSelectionUsesEachToolsNativeAdapter(t *testing.T) {
 			if selected[test.agent] != test.want {
 				t.Fatalf("reasoning effort = %q, want %q", selected[test.agent], test.want)
 			}
-			if !strings.Contains(output.String(), agentLabel(test.agent)+" · gpt-5.6-sol · 选择思考等级") {
+			if !strings.Contains(output.String(), agentLabel(test.agent)+" · "+test.model+" · 选择思考等级") {
 				t.Fatalf("tool-specific reasoning prompt missing:\n%s", output.String())
 			}
 		})
 	}
 
 	input := strings.NewReader("")
+	credential := credentialMaterial{ID: "reasoning-key"}
 	var output bytes.Buffer
 	r := &runner{in: input, reader: bufio.NewReader(input), out: &output, errOut: &output}
 	desktop, err := r.selectReasoningEfforts(

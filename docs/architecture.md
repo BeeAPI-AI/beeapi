@@ -78,7 +78,7 @@ OAuth 会话优先从账户资源读取当前余额；仅粘贴 API Key 的连�
 
 | 工具 | 检测依据 | 写入方式 |
 | --- | --- | --- |
-| Claude Code | `claude` 或 `~/.claude/settings.json` | 深度合并 BeeAPI 环境变量；推理模型写入原生 `effortLevel` |
+| Claude Code | `claude` 或 `~/.claude/settings.json` | 深度合并 BeeAPI 环境变量；普通推理档位写入 `effortLevel` 与环境覆盖，`max` 仅通过 `CLAUDE_CODE_EFFORT_LEVEL` 启用，不向 `effortLevel` 写入无效值 |
 | Claude Desktop | Claude Desktop 应用或本地配置 | Windows/macOS 写入独立的 Claude Desktop 3P 配置库与 gateway profile；Linux 明确提示暂不支持，不修改 Claude Code |
 | Codex | `codex` 或 `~/.codex/config.toml` | 语法级更新默认 `config.toml` 的 BeeAPI provider、模型与地址，使用 `beeapi token print --agent codex` 取凭据；保留其他 TOML 段与 `auth.json` |
 | Gemini CLI | `gemini` 或 `~/.gemini/settings.json` | 更新 BeeAPI 连接与专用 model alias；按模型代际写入 `thinkingLevel` 或 `thinkingBudget` |
@@ -87,7 +87,9 @@ OAuth 会话优先从账户资源读取当前余额；仅粘贴 API Key 的连�
 | OpenClaw | `openclaw` 或本地配置 | 深度合并 BeeAPI provider、默认模型、能力声明与 `thinkingDefault` |
 | Hermes | `hermes` 或 `~/.hermes/config.yaml` | 更新 `model` 连接、原生 `agent.reasoning_effort` 及 `.env` 凭据，保留 MCP 等段落 |
 
-每个工具可以选择不同的账户现有 API Key 及该 Key 可用的模型，同一个工具也可以通过多套方案保存多组 Key/模型组合。CLI 按服务端返回顺序保留 BeeAPI 的完整路由/商家市场排序，只根据 `protocols`、`recommended_for` 和客户端硬性约束过滤不兼容项。交互模式先选工具，再列出 API Key（不兼容项保留展示但不可选），最后列出所选 Key 的兼容模型。只有服务端把所选模型标记为 `reasoning` 时才询问思考等级；Claude Code、Codex、Gemini CLI、Grok Build、OpenCode、OpenClaw 与 Hermes 各自使用原生字段和值域。Claude Desktop 当前没有稳定公开的持久化思考等级字段，因而不会显示一个无法生效的选项。
+每个工具可以选择不同的账户现有 API Key 及该 Key 可用的模型，同一个工具也可以通过多套方案保存多组 Key/模型组合。CLI 按服务端返回顺序保留 BeeAPI 的完整路由/商家市场排序，只根据 `protocols`、`recommended_for` 和客户端硬性约束过滤不兼容项。交互模式先选工具，再列出可用 API Key（不兼容项隐藏并汇总数量），最后列出所选 Key 的兼容模型。
+
+推理档位由模型、该 Key 的协议/线路能力以及目标工具共同确定，不再按工具固定一套菜单。优先使用可选的协议级 `reasoning` 元数据；旧服务端标记了 `reasoning` 能力但未提供档位时，回退到已核对的官方模型规则。未知别名、不明协议转换或缺少可靠能力信息时不猜测，允许保留工具/模型默认行为。协议级能力随方案保存，离线切换不丢失线路限制；更换 Key 或模型会重新选择/校验，不能把 `max` 静默映射为 `xhigh` 或 `high`。原生字段、限制和联调契约见 [reasoning-capabilities.md](reasoning-capabilities.md)。Claude Desktop 当前没有稳定公开的持久化思考等级字段，因而不会显示一个无法生效的选项。
 
 配置写入采用与 CC Switch 相同的“投影区”思路：只接管 BeeAPI 连接所需字段及用户明确选择的工具专属参数。JSON 只深度合并目标键；TOML 只更新顶层模型选择和 BeeAPI 专属表；`.env` 只替换指定变量；Hermes YAML 只更新 `model` 连接与 `agent.reasoning_effort`。注释与无关段落尽量原样保留，写入保持幂等。Codex 的 `auth.json` 不参与修改，API Key 由原生 provider auth command 从本地凭据槽按需读取。工具因此可以直接以 `codex`、`gemini`、`grok` 或 `hermes` 启动，不再依赖 Shell 注入；旧版 Shell 管理区块会先备份再移除。
 

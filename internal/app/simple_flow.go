@@ -13,6 +13,7 @@ import (
 
 	"github.com/BeeAPI-AI/beeapi/internal/beeapi"
 	"github.com/BeeAPI-AI/beeapi/internal/configurator"
+	"github.com/BeeAPI-AI/beeapi/internal/reasoning"
 	"github.com/BeeAPI-AI/beeapi/internal/state"
 )
 
@@ -492,7 +493,8 @@ func (r *runner) configureToolInteractive() error {
 	profile := state.Profile{
 		ID: nextProfileID(name, cfg.Profiles), Name: name, Endpoint: cfg.Endpoint,
 		Models: models, ReasoningEfforts: reasoningEfforts, Agents: []string{agent}, AgentCredentials: assignments,
-		CreatedAt: now, UpdatedAt: now,
+		ReasoningSelections: reasoningSelections([]string{agent}, credentials, assignments, models),
+		CreatedAt:           now, UpdatedAt: now,
 	}
 	setProfileDefaultModel(&profile)
 	r.format(r.out, "\n  方案    %s\n", "\n  Configuration  %s\n", profile.Name)
@@ -574,8 +576,9 @@ func profileProjection(profile state.Profile, agent string) state.Profile {
 	return state.Profile{
 		ID: profile.ID, Name: profile.Name, Endpoint: profile.Endpoint,
 		DefaultModel: profile.Models[agent], Models: map[string]string{agent: profile.Models[agent]},
-		ReasoningEfforts: map[string]string{agent: profile.ReasoningEfforts[agent]},
-		Agents:           []string{agent}, AgentCredentials: map[string]string{agent: profile.AgentCredentials[agent]},
+		ReasoningEfforts:    map[string]string{agent: profile.ReasoningEfforts[agent]},
+		ReasoningSelections: projectReasoningSelections(profile.ReasoningSelections, agent),
+		Agents:              []string{agent}, AgentCredentials: map[string]string{agent: profile.AgentCredentials[agent]},
 		CreatedAt: profile.CreatedAt, UpdatedAt: profile.UpdatedAt,
 	}
 }
@@ -600,7 +603,8 @@ func (r *runner) applyProfileForAgent(cfg *state.Config, profile state.Profile, 
 	}
 	result, err := configurator.Apply(r.store, configurator.Options{
 		Endpoint: selected.Endpoint, APIKeys: apiKeys, Models: selected.Models, ReasoningEfforts: selected.ReasoningEfforts,
-		Agents: selected.Agents, BinaryPath: binaryPath,
+		ReasoningSelections: selected.ReasoningSelections,
+		Agents:              selected.Agents, BinaryPath: binaryPath,
 	})
 	if err != nil {
 		return configurator.Result{}, err
@@ -613,6 +617,14 @@ func (r *runner) applyProfileForAgent(cfg *state.Config, profile state.Profile, 
 	}
 	r.clearUsageCache()
 	return result, nil
+}
+
+func projectReasoningSelections(selections map[string]reasoning.Selection, agent string) map[string]reasoning.Selection {
+	cloned := reasoning.Clone(selections)
+	if selection, ok := cloned[agent]; ok {
+		return map[string]reasoning.Selection{agent: selection}
+	}
+	return nil
 }
 
 func (r *runner) printCurrentToolConfigurations(cfg state.Config, agents []string) {

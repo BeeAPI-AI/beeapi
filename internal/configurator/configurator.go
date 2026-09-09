@@ -1,16 +1,19 @@
 package configurator
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 
+	"github.com/BeeAPI-AI/beeapi/internal/reasoning"
 	"github.com/BeeAPI-AI/beeapi/internal/state"
 )
 
@@ -31,14 +34,15 @@ var SupportedAgents = []string{
 }
 
 type Options struct {
-	Endpoint         string
-	APIKey           string
-	APIKeys          map[string]string
-	Model            string
-	Models           map[string]string
-	ReasoningEfforts map[string]string
-	Agents           []string
-	BinaryPath       string
+	Endpoint            string
+	APIKey              string
+	APIKeys             map[string]string
+	Model               string
+	Models              map[string]string
+	ReasoningEfforts    map[string]string
+	ReasoningSelections map[string]reasoning.Selection
+	Agents              []string
+	BinaryPath          string
 }
 
 type Result struct {
@@ -86,11 +90,14 @@ func Apply(store *state.Store, options Options) (Result, error) {
 			}
 		}
 		if reasoningEffort != "" {
-			if !agentSupportsReasoningEffort(agent) {
+			if !reasoning.SupportsAgent(agent) {
 				return Result{}, fmt.Errorf("%s 不支持由 GetBeeAPI 写入思考等级", agent)
 			}
-			if !validReasoningEffort(agent, reasoningEffort) {
-				return Result{}, fmt.Errorf("%s 思考等级 %q 无效", agent, reasoningEffort)
+			if !slices.Contains(reasoningValues(options, agent), reasoningEffort) {
+				return Result{}, fmt.Errorf("%s 模型 %s 的思考等级 %q 无效，请编辑方案重新选择", agent, model, reasoningEffort)
+			}
+			if agent == "codex" && reasoningEffort == "max" && !probeCodexMax() {
+				return Result{}, errors.New("本机 Codex 尚未确认支持 max 配置，请更新 Codex 或编辑方案选择其他档位")
 			}
 		}
 		path := pathForAgent(home, agent)
@@ -312,9 +319,23 @@ func writeAgent(home, agent string, options Options) ([]string, error) {
 				"ANTHROPIC_DEFAULT_OPUS_MODEL":   model,
 			},
 		}
-		managed := []jsonPathPatch{{Path: []string{"effortLevel"}, Remove: true}}
+		managed := []jsonPathPatch{
+			{Path: []string{"effortLevel"}, Remove: true},
+			{Path: []string{"env", "CLAUDE_CODE_EFFORT_LEVEL"}, Remove: true},
+		}
 		if effort := reasoningEffortForAgent(options, agent); effort != "" {
-			managed[0] = jsonPathPatch{Path: []string{"effortLevel"}, Value: effort}
+			if effort != "max" {
+				managed[0] = jsonPathPatch{Path: []string{"effortLevel"}, Value: effort}
+			}
+			// max is not accepted in effortLevel/modelSettings. An environment
+			// override also wins over stale per-model effort saved by /effort.
+			managed[1] = jsonPathPatch{Path: []string{"env", "CLAUDE_CODE_EFFORT_LEVEL"}, Value: effort}
+			if effort == "max" {
+				managed = append(managed,
+					jsonPathPatch{Path: []string{"alwaysThinkingEnabled"}, Value: true},
+					jsonPathPatch{Path: []string{"env", "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING"}, Remove: true},
+				)
+			}
 		}
 		err := mergeJSONPaths(paths[0], patch, managed)
 		return paths[:1], err
@@ -365,7 +386,7 @@ func writeAgent(home, agent string, options Options) ([]string, error) {
 				"modelConfig": map[string]any{
 					"model": model,
 					"generateContentConfig": map[string]any{
-						"thinkingConfig": geminiThinkingConfig(model, effort),
+						"thinkingConfig": thinkingConfig(reasoningCapability(options, agent), effort),
 					},
 				},
 			}}
@@ -399,7 +420,7 @@ func writeAgent(home, agent string, options Options) ([]string, error) {
 		if effort := reasoningEffortForAgent(options, agent); effort != "" {
 			modelFields[7] = setTOMLField("reasoning_effort", strconv.Quote(effort))
 			modelFields[8] = setTOMLField("supports_reasoning_effort", "true")
-			modelFields[9] = setTOMLField("reasoning_efforts", `["low", "medium", "high", "xhigh"]`)
+			modelFields[9] = setTOMLField("reasoning_efforts", quotedValues(reasoningValues(options, agent)))
 		}
 		err := patchTOMLFile(paths[0], nil, []tomlSectionPatch{
 			{Name: "model.beeapi", Fields: modelFields},
@@ -431,10 +452,14 @@ func writeAgent(home, agent string, options Options) ([]string, error) {
 		modelConfig := map[string]any{"id": model, "name": model}
 		managed := []jsonPathPatch{{Path: []string{"agents", "defaults", "thinkingDefault"}, Remove: true}}
 		if effort := reasoningEffortForAgent(options, agent); effort != "" {
-			managed[0] = jsonPathPatch{Path: []string{"agents", "defaults", "thinkingDefault"}, Value: effort}
+			level := effort
+			if level == "none" {
+				level = "off"
+			}
+			managed[0] = jsonPathPatch{Path: []string{"agents", "defaults", "thinkingDefault"}, Value: level}
 			modelConfig["reasoning"] = true
 			modelConfig["compat"] = map[string]any{
-				"supportedReasoningEfforts": []any{"minimal", "low", "medium", "high", "xhigh"},
+				"supportedReasoningEfforts": reasoningValues(options, agent),
 			}
 		}
 		err := mergeJSONPaths(paths[0], map[string]any{
@@ -505,61 +530,35 @@ func reasoningEffortForAgent(options Options, agent string) string {
 	return strings.ToLower(strings.TrimSpace(options.ReasoningEfforts[agent]))
 }
 
-func reasoningEffortValues(agent string) []string {
-	switch agent {
-	case "claude":
-		return []string{"low", "medium", "high", "xhigh"}
-	case "codex":
-		return []string{"minimal", "low", "medium", "high", "xhigh"}
-	case "gemini":
-		return []string{"minimal", "low", "medium", "high"}
-	case "grok":
-		return []string{"low", "medium", "high", "xhigh"}
-	case "opencode":
-		return []string{"low", "medium", "high"}
-	case "openclaw", "hermes":
-		return []string{"minimal", "low", "medium", "high", "xhigh"}
-	default:
-		return nil
+var probeCodexMax = func() bool { return reasoning.CodexSupportsMax(context.Background()) }
+
+func reasoningCapability(options Options, agent string) reasoning.Capability {
+	var snapshot *reasoning.Selection
+	if selection, ok := options.ReasoningSelections[agent]; ok {
+		snapshot = &selection
 	}
+	return reasoning.Resolve(agent, modelForAgent(options, agent), snapshot)
 }
 
-func agentSupportsReasoningEffort(agent string) bool {
-	return len(reasoningEffortValues(agent)) > 0
+func reasoningValues(options Options, agent string) []string {
+	return reasoning.Values(agent, reasoningCapability(options, agent))
 }
 
-func validReasoningEffort(agent, value string) bool {
-	wanted := strings.ToLower(strings.TrimSpace(value))
-	for _, allowed := range reasoningEffortValues(agent) {
-		if wanted == allowed {
-			return true
-		}
+func quotedValues(values []string) string {
+	quoted := make([]string, len(values))
+	for i, value := range values {
+		quoted[i] = strconv.Quote(value)
 	}
-	return false
+	return "[" + strings.Join(quoted, ", ") + "]"
 }
 
 func geminiThinkingConfig(model, effort string) map[string]any {
-	model = strings.ToLower(strings.TrimSpace(model))
-	effort = strings.ToLower(strings.TrimSpace(effort))
-	if strings.HasPrefix(model, "gemini-2.5-") {
-		budget := 8192
-		switch effort {
-		case "minimal":
-			if strings.Contains(model, "-pro") {
-				budget = 128
-			} else {
-				budget = 0
-			}
-		case "low":
-			budget = 1024
-		case "high":
-			if strings.Contains(model, "-pro") {
-				budget = 32768
-			} else {
-				budget = 24576
-			}
-		}
-		return map[string]any{"thinkingBudget": budget}
+	return thinkingConfig(reasoning.Fallback(model, reasoning.Contents), effort)
+}
+
+func thinkingConfig(capability reasoning.Capability, effort string) map[string]any {
+	if capability.Mode == "budget" {
+		return map[string]any{"thinkingBudget": capability.Budgets[effort]}
 	}
 	return map[string]any{"thinkingLevel": strings.ToUpper(effort)}
 }

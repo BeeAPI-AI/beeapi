@@ -324,6 +324,11 @@ func (r *runner) configureInteractive() error {
 	if err != nil {
 		return err
 	}
+	efforts, err := r.selectReasoningEfforts(agents, credentials, assignments, selectedModels, cfg.ReasoningEfforts)
+	if err != nil {
+		return err
+	}
+	selections := reasoningSelections(agents, credentials, assignments, selectedModels)
 	apiKeys, err := apiKeysForAssignments(agents, credentials, assignments)
 	if err != nil {
 		return err
@@ -333,13 +338,14 @@ func (r *runner) configureInteractive() error {
 		binaryPath, _ = os.Executable()
 	}
 	result, err := configurator.Apply(r.store, configurator.Options{
-		Endpoint: cfg.Endpoint, APIKeys: apiKeys, Models: selectedModels, ReasoningEfforts: cfg.ReasoningEfforts,
+		Endpoint: cfg.Endpoint, APIKeys: apiKeys, Models: selectedModels, ReasoningEfforts: efforts, ReasoningSelections: selections,
 		Agents: agents, BinaryPath: binaryPath,
 	})
 	if err != nil {
 		return err
 	}
 	cfg.Agents, cfg.Models, cfg.AgentCredentials, cfg.BinaryPath = agents, selectedModels, assignments, binaryPath
+	cfg.ReasoningEfforts, cfg.ReasoningSelections = efforts, selections
 	setDefaultModel(&cfg, agents, selectedModels)
 	syncCurrentProfile(&cfg)
 	if err := r.store.SaveConfig(cfg); err != nil {
@@ -370,6 +376,11 @@ func (r *runner) reconfigureCurrentAgents(cfg *state.Config, endpoint string) (s
 	if err != nil {
 		return "", err
 	}
+	efforts, err := r.selectReasoningEfforts(cfg.Agents, credentials, assignments, selectedModels, cfg.ReasoningEfforts)
+	if err != nil {
+		return "", err
+	}
+	selections := reasoningSelections(cfg.Agents, credentials, assignments, selectedModels)
 	apiKeys, err := apiKeysForAssignments(cfg.Agents, credentials, assignments)
 	if err != nil {
 		return "", err
@@ -378,7 +389,7 @@ func (r *runner) reconfigureCurrentAgents(cfg *state.Config, endpoint string) (s
 		cfg.BinaryPath, _ = os.Executable()
 	}
 	result, err := configurator.Apply(r.store, configurator.Options{
-		Endpoint: endpoint, APIKeys: apiKeys, Models: selectedModels, ReasoningEfforts: cfg.ReasoningEfforts,
+		Endpoint: endpoint, APIKeys: apiKeys, Models: selectedModels, ReasoningEfforts: efforts, ReasoningSelections: selections,
 		Agents: cfg.Agents, BinaryPath: cfg.BinaryPath,
 	})
 	if err != nil {
@@ -386,6 +397,7 @@ func (r *runner) reconfigureCurrentAgents(cfg *state.Config, endpoint string) (s
 	}
 	cfg.Endpoint = endpoint
 	cfg.Models, cfg.AgentCredentials = selectedModels, assignments
+	cfg.ReasoningEfforts, cfg.ReasoningSelections = efforts, selections
 	if cfg.AgentEndpoints == nil {
 		cfg.AgentEndpoints = map[string]string{}
 	}
