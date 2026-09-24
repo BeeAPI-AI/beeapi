@@ -375,6 +375,31 @@ func TestClaudeDesktopUsesSeparate3PConfiguration(t *testing.T) {
 	}
 }
 
+func TestClaudeDesktopUsesMSIXVirtualizedConfiguration(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	localAppData := filepath.Join(home, "AppData", "Local")
+	packageRoot := filepath.Join(localAppData, "Packages", "Claude_pzs8sxrjxfjjc")
+	t.Setenv("LOCALAPPDATA", localAppData)
+	if err := os.MkdirAll(filepath.Join(packageRoot, "LocalCache"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	paths := claudeDesktopPaths(home, "windows")
+	wantRoot := filepath.Join(packageRoot, "LocalCache")
+	if !strings.HasPrefix(paths[0], filepath.Join(wantRoot, "Roaming", "Claude")) || !strings.HasPrefix(paths[1], filepath.Join(wantRoot, "Local", "Claude-3p")) {
+		t.Fatalf("MSIX paths were not selected: %#v", paths)
+	}
+	if err := writeClaudeDesktop(paths, "https://beeapi.ai", "sk-msix", "claude-sonnet-4-6"); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range paths {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("MSIX configuration file was not written: %s: %v", path, err)
+		}
+	}
+}
+
 func TestApplyWritesEverySupportedCLIAdapter(t *testing.T) {
 	root := t.TempDir()
 	home := filepath.Join(root, "home")

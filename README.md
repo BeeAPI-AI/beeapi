@@ -93,7 +93,7 @@ beeapi token print --agent codex 仅向 Codex 的 BeeAPI provider 提供已分�
 - Hosts 只写入带 `getbeeapi managed` 标记的区块；写入前备份，可独立移除。
 - 原有工具配置会先做逐文件完整备份；随后只修改 BeeAPI provider、API 地址、所选 Key、模型与必要的鉴权选择字段，不清空权限、MCP、主题或其他 provider。
 - 每个获准导出的账户 Key 都在本机独立存储并可分配给不同工具；Codex 通过 `beeapi token print --agent codex` 按工具读取，不把 Key 明文写进 `config.toml`，现有 `auth.json` 保持不动。
-- Claude Desktop 的官方 3P gateway 格式要求把所选 Key 写入其独立 profile；GetBeeAPI 只在 Windows/macOS 的 Desktop 专用目录执行此操作，写前纳入完整备份，绝不复用或修改 Claude Code 配置。
+- Claude Desktop 的官方 3P gateway 格式要求把所选 Key 写入其独立 profile；GetBeeAPI 只在 Windows/macOS 的 Desktop 专用目录执行此操作，写前纳入完整备份。Desktop 的 Code 标签页仍会按 Claude 官方规则读取与 Claude Code 共享的 `~/.claude` 基础设置，但 Desktop gateway 不会借此覆盖 Claude Code 的连接字段。
 - 命名配置方案只保存凭据 ID，不复制 API Key；每个工具独立维护多套方案，切换只备份和更新该工具，工具文件与本地活动映射都成功后才生效。
 - OAuth 连接可直接读取账户级余额；仅粘贴 API Key 的连接使用 API Key 鉴权的只读 `/v1/usage`。两种方式都不会发送模型请求或产生用量；首页使用短期缓存，详情页可主动刷新并检查每个 Key 的可用状态。
 - 凭据优先进入系统钥匙串；不可用时退回相互隔离、权限为 `0600` 的本地文件。

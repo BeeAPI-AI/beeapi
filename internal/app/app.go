@@ -565,6 +565,23 @@ func detectEnvironments() ([]environment, error) {
 }
 
 func findClaudeDesktop(home string) string {
+	if runtime.GOOS == "windows" {
+		if installLocation := findWindowsClaudeDesktopInstall(); installLocation != "" {
+			return installLocation
+		}
+	}
+	for _, candidate := range claudeDesktopCandidates(home, runtime.GOOS) {
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+	return ""
+}
+
+// claudeDesktopCandidates keeps detection separate from the shared Claude
+// Code settings. Desktop and CLI share ~/.claude settings, but Desktop's
+// app/profile installation is still a separate thing to detect.
+func claudeDesktopCandidates(home, goos string) []string {
 	candidates := []string{
 		filepath.Join(home, "Applications", "Claude.app"),
 		filepath.Join(home, "Library", "Application Support", "Claude", "claude_desktop_config.json"),
@@ -572,18 +589,81 @@ func findClaudeDesktop(home string) string {
 		filepath.Join(home, ".config", "claude", "claude_desktop_config.json"),
 		"/Applications/Claude.app",
 	}
-	if localAppData := strings.TrimSpace(os.Getenv("LOCALAPPDATA")); localAppData != "" {
-		candidates = append(candidates,
-			filepath.Join(localAppData, "Programs", "Claude", "Claude.exe"),
-			filepath.Join(localAppData, "AnthropicClaude", "Claude.exe"),
-		)
+	if goos != "windows" {
+		return candidates
 	}
-	for _, candidate := range candidates {
-		if _, err := os.Stat(candidate); err == nil {
-			return candidate
+
+	localAppData := strings.TrimSpace(os.Getenv("LOCALAPPDATA"))
+	if localAppData == "" {
+		localAppData = filepath.Join(home, "AppData", "Local")
+	}
+	appData := strings.TrimSpace(os.Getenv("APPDATA"))
+	if appData == "" {
+		appData = filepath.Join(home, "AppData", "Roaming")
+	}
+	candidates = append(candidates,
+		filepath.Join(localAppData, "Programs", "Claude", "Claude.exe"),
+		filepath.Join(localAppData, "AnthropicClaude", "Claude.exe"),
+		filepath.Join(localAppData, "Microsoft", "WindowsApps", "Claude.exe"),
+		filepath.Join(localAppData, "Claude", "claude_desktop_config.json"),
+		filepath.Join(localAppData, "Claude-3p", "claude_desktop_config.json"),
+		filepath.Join(appData, "Claude", "claude_desktop_config.json"),
+		filepath.Join(appData, "Claude-3p", "claude_desktop_config.json"),
+	)
+
+	// Microsoft Store/MSIX data is redirected per user. The package suffix
+	// changes with the publisher package, so match it instead of hard-coding
+	// one version or family name.
+	for _, pattern := range []string{
+		filepath.Join(localAppData, "Packages", "Claude_*"),
+		filepath.Join(localAppData, "Packages", "AnthropicClaude_*"),
+	} {
+		packageRoots, _ := filepath.Glob(pattern)
+		for _, packageRoot := range packageRoots {
+			candidates = append(candidates,
+				filepath.Join(packageRoot, "LocalCache", "Roaming", "Claude"),
+				filepath.Join(packageRoot, "LocalCache", "Local", "Claude-3p", "claude_desktop_config.json"),
+				filepath.Join(packageRoot, "LocalCache", "Local", "Claude-3p", "configLibrary", "_meta.json"),
+				filepath.Join(packageRoot, "LocalCache", "Local", "Claude", "claude_desktop_config.json"),
+				filepath.Join(packageRoot, "app", "Claude.exe"),
+				packageRoot,
+			)
 		}
 	}
-	return ""
+	for _, programFiles := range []string{
+		strings.TrimSpace(os.Getenv("ProgramFiles")),
+		strings.TrimSpace(os.Getenv("ProgramW6432")),
+	} {
+		if programFiles == "" {
+			continue
+		}
+		matches, _ := filepath.Glob(filepath.Join(programFiles, "WindowsApps", "Claude_*", "app", "Claude.exe"))
+		candidates = append(candidates, matches...)
+	}
+	return candidates
+}
+
+// findWindowsClaudeDesktopInstall uses the Windows package registry as a
+// fallback when the MSIX executable is inside the protected WindowsApps
+// directory and no 3P profile has been created yet.
+func findWindowsClaudeDesktopInstall() string {
+	powershell, err := exec.LookPath("powershell.exe")
+	if err != nil {
+		return ""
+	}
+	script := `$package = Get-AppxPackage -Name Claude -ErrorAction SilentlyContinue | Select-Object -First 1; if ($package) { $package.InstallLocation }`
+	output, err := exec.Command(powershell, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script).Output()
+	if err != nil {
+		return ""
+	}
+	location := strings.TrimSpace(string(output))
+	if location == "" {
+		return ""
+	}
+	if _, err := os.Stat(location); err != nil {
+		return ""
+	}
+	return location
 }
 
 func (r *runner) printEnvironments(environments []environment) {

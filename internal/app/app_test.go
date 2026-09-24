@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -230,6 +231,52 @@ func TestParseAgentsIncludesEverySupportedToolAlias(t *testing.T) {
 	if !reflect.DeepEqual(agents, want) {
 		t.Fatalf("agents = %#v, want %#v", agents, want)
 	}
+}
+
+func TestClaudeDesktopDetectionIncludesWindowsMSIXProfile(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	localAppData := filepath.Join(root, "AppData", "Local")
+	t.Setenv("LOCALAPPDATA", localAppData)
+	t.Setenv("APPDATA", filepath.Join(root, "AppData", "Roaming"))
+
+	profile := filepath.Join(localAppData, "Packages", "Claude_pzs8sxrjxfjjc", "LocalCache", "Local", "Claude-3p", "configLibrary", "_meta.json")
+	if err := os.MkdirAll(filepath.Dir(profile), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(profile, []byte(`{"appliedId":"00000000-0000-4000-8000-000000157210"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	found := findExistingClaudeDesktopCandidate(claudeDesktopCandidates(home, "windows"))
+	if found != profile {
+		t.Fatalf("MSIX Claude Desktop profile was not detected: got %q, want %q", found, profile)
+	}
+}
+
+func TestClaudeDesktopDetectionDoesNotReuseClaudeCodeSettings(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".claude", "settings.json"), []byte(`{"env":{"ANTHROPIC_BASE_URL":"https://beeapi.dev"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LOCALAPPDATA", filepath.Join(root, "AppData", "Local"))
+	t.Setenv("APPDATA", filepath.Join(root, "AppData", "Roaming"))
+	if got := findExistingClaudeDesktopCandidate(claudeDesktopCandidates(home, "windows")); got != "" {
+		t.Fatalf("Claude Code settings incorrectly detected as Claude Desktop: %q", got)
+	}
+}
+
+func findExistingClaudeDesktopCandidate(candidates []string) string {
+	for _, candidate := range candidates {
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+	return ""
 }
 
 func TestRunEnvironmentsDoNotOverrideNativeConfigHomes(t *testing.T) {

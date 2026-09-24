@@ -284,6 +284,13 @@ func claudeDesktopPaths(home, goos string) []string {
 		}
 		appRoot = filepath.Join(localAppData, "Claude")
 		thirdPartyRoot = filepath.Join(localAppData, "Claude-3p")
+		if packageRoot := claudeDesktopMSIXPackageRoot(localAppData); packageRoot != "" {
+			// Store/MSIX builds redirect the writable Desktop profiles into
+			// the per-user package cache. Prefer it when present so the app
+			// reads the profile that GetBeeAPI just updated.
+			appRoot = filepath.Join(packageRoot, "LocalCache", "Roaming", "Claude")
+			thirdPartyRoot = filepath.Join(packageRoot, "LocalCache", "Local", "Claude-3p")
+		}
 	default:
 		// The caller rejects Linux writes. Returning isolated paths keeps path
 		// discovery deterministic without ever treating Claude Code as Desktop.
@@ -297,6 +304,25 @@ func claudeDesktopPaths(home, goos string) []string {
 		filepath.Join(configLibrary, "_meta.json"),
 		filepath.Join(configLibrary, claudeDesktopProfileID+".json"),
 	}
+}
+
+func claudeDesktopMSIXPackageRoot(localAppData string) string {
+	var roots []string
+	for _, pattern := range []string{
+		filepath.Join(localAppData, "Packages", "Claude_*"),
+		filepath.Join(localAppData, "Packages", "AnthropicClaude_*"),
+	} {
+		matches, _ := filepath.Glob(pattern)
+		roots = append(roots, matches...)
+	}
+	sort.Strings(roots)
+	for index := len(roots) - 1; index >= 0; index-- {
+		root := roots[index]
+		if _, err := os.Stat(filepath.Join(root, "LocalCache")); err == nil {
+			return root
+		}
+	}
+	return ""
 }
 
 func pathForAgent(home, agent string) string {

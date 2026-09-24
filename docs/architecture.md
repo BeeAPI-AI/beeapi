@@ -79,7 +79,7 @@ OAuth 会话优先从账户资源读取当前余额；仅粘贴 API Key 的连�
 | 工具 | 检测依据 | 写入方式 |
 | --- | --- | --- |
 | Claude Code | `claude` 或 `~/.claude/settings.json` | 深度合并 BeeAPI 环境变量；普通推理档位写入 `effortLevel` 与环境覆盖，`max` 仅通过 `CLAUDE_CODE_EFFORT_LEVEL` 启用，不向 `effortLevel` 写入无效值 |
-| Claude Desktop | Claude Desktop 应用或本地配置 | Windows/macOS 写入独立的 Claude Desktop 3P 配置库与 gateway profile；Linux 明确提示暂不支持，不修改 Claude Code |
+| Claude Desktop | Windows/macOS 的 Claude Desktop 应用、传统配置或 MSIX 包数据；不把 `~/.claude` 单独文件当成 Desktop 安装 | Windows/macOS 写入独立的 Claude Desktop 3P 配置库与 gateway profile；Desktop 的 Code 标签页仍共享 Claude 官方的基础 settings/MCP；Linux 明确提示暂不支持 |
 | Codex | `codex` 或 `~/.codex/config.toml` | 语法级更新默认 `config.toml` 的 BeeAPI provider、模型与地址，使用 `beeapi token print --agent codex` 取凭据；保留其他 TOML 段与 `auth.json` |
 | Gemini CLI | `gemini` 或 `~/.gemini/settings.json` | 更新 BeeAPI 连接与专用 model alias；按模型代际写入 `thinkingLevel` 或 `thinkingBudget` |
 | Grok Build | `grok` 或 `~/.grok/config.toml` | 更新 `model.beeapi`、默认模型及该模型的原生 `reasoning_effort`，保留 UI、MCP 和其他模型 |
@@ -93,7 +93,7 @@ OAuth 会话优先从账户资源读取当前余额；仅粘贴 API Key 的连�
 
 配置写入采用与 CC Switch 相同的“投影区”思路：只接管 BeeAPI 连接所需字段及用户明确选择的工具专属参数。JSON 只深度合并目标键；TOML 只更新顶层模型选择和 BeeAPI 专属表；`.env` 只替换指定变量；Hermes YAML 只更新 `model` 连接与 `agent.reasoning_effort`。注释与无关段落尽量原样保留，写入保持幂等。Codex 的 `auth.json` 不参与修改，API Key 由原生 provider auth command 从本地凭据槽按需读取。工具因此可以直接以 `codex`、`gemini`、`grok` 或 `hermes` 启动，不再依赖 Shell 注入；旧版 Shell 管理区块会先备份再移除。
 
-Claude Desktop 与 Claude Code 是两个独立适配器。Desktop 仅在 Windows/macOS 使用官方 3P gateway 配置，当前只开放可直连 BeeAPI Anthropic Messages 且模型 ID 属于 `claude-sonnet-*`、`claude-opus-*` 或 `claude-haiku-*` 的组合；切换后需要完全退出并重开 Desktop。3P 格式要求 API Key 出现在 Desktop 自己的 gateway profile 中，因此该文件会与其他目标文件一起备份并限制为当前用户可读。需要模型映射或协议转换的组合暂不伪装成可用，也不会通过修改 `~/.claude/settings.json` 冒充 Desktop 支持。
+Claude Desktop 与 Claude Code 在 CLI 配置中心中是两个独立的 provider 适配器，但并非所有数据都隔离：Claude 官方 Desktop 的 Code 标签页会读取与 CLI 共享的 `~/.claude/settings.json`、`~/.claude.json`、MCP、Hooks、Skills 与项目记忆。Desktop 的第三方 gateway 仍使用独立的 3P profile。Desktop 仅在 Windows/macOS 使用该官方 3P gateway 配置，当前只开放可直连 BeeAPI Anthropic Messages 且模型 ID 属于 `claude-sonnet-*`、`claude-opus-*` 或 `claude-haiku-*` 的组合；切换后需要完全退出并重开 Desktop。3P 格式要求 API Key 出现在 Desktop 自己的 gateway profile 中，因此该文件会与其他目标文件一起备份并限制为当前用户可读。需要模型映射或协议转换的组合暂不伪装成可用，也不会通过修改 `~/.claude/settings.json` 冒充 Desktop gateway。
 
 ## 发布与安装
 
